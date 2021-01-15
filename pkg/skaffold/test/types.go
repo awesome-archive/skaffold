@@ -21,6 +21,7 @@ import (
 	"io"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 )
 
@@ -34,6 +35,10 @@ type Tester interface {
 	TestDependencies() ([]string, error)
 }
 
+type Muted interface {
+	MuteTest() bool
+}
+
 // FullTester serves as a holder for the individual artifact-specific
 // testers. It exists so that the Tester interface can mimic the Builder/Deployer
 // interface, so it can be called in a similar fashion from the Runner, while
@@ -42,9 +47,11 @@ type Tester interface {
 // FullTester should always be the ONLY implementation of the Tester interface;
 // newly added testing implementations should implement the Runner interface.
 type FullTester struct {
-	testCases  []*latest.TestCase
-	workingDir string
-	extraEnv   []string
+	testCases      []*latest.TestCase
+	localDaemon    docker.LocalDaemon
+	muted          Muted
+	workingDir     string
+	imagesAreLocal func(imageName string) (bool, error)
 }
 
 // Runner is the lowest-level test executor in Skaffold, responsible for

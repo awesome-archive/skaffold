@@ -18,23 +18,18 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
+	sErrors "github.com/GoogleContainerTools/skaffold/pkg/skaffold/errors"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-)
-
-var (
-	// For testing
-	buildComplete = event.BuildComplete
 )
 
 func (c *cache) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact, buildAndTest BuildAndTestFn) ([]build.Artifact, error) {
@@ -64,10 +59,8 @@ func (c *cache) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, ar
 		result := results[i]
 		switch result := result.(type) {
 		case failed:
-			logrus.Warnf("error checking cache, caching may not work as expected: %v", result.err)
-			color.Yellow.Fprintln(out, "Error checking cache. Rebuilding.")
-			needToBuild = append(needToBuild, artifact)
-			continue
+			color.Red.Fprintln(out, "Error checking cache.")
+			return nil, result.err
 
 		case needsBuilding:
 			color.Yellow.Fprintln(out, "Not found. Building")
@@ -78,17 +71,21 @@ func (c *cache) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, ar
 		case needsTagging:
 			color.Green.Fprintln(out, "Found. Tagging")
 			if err := result.Tag(ctx, c); err != nil {
-				return nil, errors.Wrap(err, "tagging image")
+				return nil, fmt.Errorf("tagging image: %w", err)
 			}
 
 		case needsPushing:
 			color.Green.Fprintln(out, "Found. Pushing")
 			if err := result.Push(ctx, out, c); err != nil {
-				return nil, errors.Wrap(err, "pushing image")
+				return nil, fmt.Errorf("%s: %w", sErrors.PushImageErr, err)
 			}
 
 		default:
-			if c.imagesAreLocal {
+			isLocal, err := c.isLocalImage(artifact.ImageName)
+			if err != nil {
+				return nil, err
+			}
+			if isLocal {
 				color.Green.Fprintln(out, "Found Locally")
 			} else {
 				color.Green.Fprintln(out, "Found Remotely")
@@ -96,21 +93,26 @@ func (c *cache) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, ar
 		}
 
 		// Image is already built
-		buildComplete(artifact.ImageName)
+		c.cacheMutex.RLock()
 		entry := c.artifactCache[result.Hash()]
+		c.cacheMutex.RUnlock()
 		tag := tags[artifact.ImageName]
 
 		var uniqueTag string
-		if c.imagesAreLocal {
+		isLocal, err := c.isLocalImage(artifact.ImageName)
+		if err != nil {
+			return nil, err
+		}
+		if isLocal {
 			var err error
-			uniqueTag, err = c.client.TagWithImageID(ctx, tag, entry.ID)
+			uniqueTag, err = build.TagWithImageID(ctx, tag, entry.ID, c.client)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			uniqueTag = tag + "@" + entry.Digest
+			uniqueTag = build.TagWithDigest(tag, entry.Digest)
 		}
-
+		c.artifactStore.Record(artifact, uniqueTag)
 		alreadyBuilt = append(alreadyBuilt, build.Artifact{
 			ImageName: artifact.ImageName,
 			Tag:       uniqueTag,
@@ -121,7 +123,7 @@ func (c *cache) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, ar
 
 	bRes, err := buildAndTest(ctx, out, tags, needToBuild)
 	if err != nil {
-		return nil, errors.Wrap(err, "build failed")
+		return nil, err
 	}
 
 	if err := c.addArtifacts(ctx, bRes, hashByName); err != nil {
@@ -155,27 +157,29 @@ func maintainArtifactOrder(built []build.Artifact, artifacts []*latest.Artifact)
 func (c *cache) addArtifacts(ctx context.Context, bRes []build.Artifact, hashByName map[string]string) error {
 	for _, a := range bRes {
 		entry := ImageDetails{}
-
-		if !c.imagesAreLocal {
-			ref, err := docker.ParseReference(a.Tag)
-			if err != nil {
-				return errors.Wrapf(err, "parsing reference %s", a.Tag)
-			}
-
-			entry.Digest = ref.Digest
-		}
-
-		imageID, err := c.client.ImageID(ctx, a.Tag)
+		isLocal, err := c.isLocalImage(a.ImageName)
 		if err != nil {
 			return err
 		}
+		if isLocal {
+			imageID, err := c.client.ImageID(ctx, a.Tag)
+			if err != nil {
+				return err
+			}
 
-		if imageID != "" {
-			entry.ID = imageID
+			if imageID != "" {
+				entry.ID = imageID
+			}
+		} else {
+			ref, err := docker.ParseReference(a.Tag)
+			if err != nil {
+				return fmt.Errorf("parsing reference %q: %w", a.Tag, err)
+			}
+			entry.Digest = ref.Digest
 		}
-
+		c.cacheMutex.Lock()
 		c.artifactCache[hashByName[a.ImageName]] = entry
+		c.cacheMutex.Unlock()
 	}
-
 	return nil
 }

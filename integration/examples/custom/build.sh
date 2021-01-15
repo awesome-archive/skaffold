@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-pack build --builder=heroku/buildpacks $IMAGE
+if ! [ -x "$(command -v ko)" ]; then
+    pushd $(mktemp -d)
+    go mod init tmp; GOFLAGS= go get github.com/google/ko/cmd/ko@v0.6.0
+    popd
+fi
 
-if $PUSH_IMAGE; then
-    docker push $IMAGE
+output=$(ko publish --local --preserve-import-paths --tags= . | tee)
+ref=$(echo "$output" | tail -n1)
+
+docker tag "$ref" "$IMAGE"
+if [[ "${PUSH_IMAGE}" == "true" ]]; then
+    docker push "$IMAGE"
 fi

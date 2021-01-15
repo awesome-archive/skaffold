@@ -19,6 +19,7 @@ package gcb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +27,6 @@ import (
 	"time"
 
 	cstorage "cloud.google.com/go/storage"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	cloudbuild "google.golang.org/api/cloudbuild/v1"
 	"google.golang.org/api/googleapi"
@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
@@ -45,27 +44,41 @@ import (
 )
 
 // Build builds a list of artifacts with Google Cloud Build.
-func (b *Builder) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]build.Artifact, error) {
-	return build.InParallel(ctx, out, tags, artifacts, b.buildArtifactWithCloudBuild, b.GoogleCloudBuild.Concurrency)
+func (b *Builder) Build(ctx context.Context, out io.Writer, artifact *latest.Artifact) build.ArtifactBuilder {
+	builder := build.WithLogFile(b.buildArtifactWithCloudBuild, b.muted)
+	return builder
+}
+
+func (b *Builder) PreBuild(_ context.Context, _ io.Writer) error {
+	return nil
+}
+
+func (b *Builder) PostBuild(_ context.Context, _ io.Writer) error {
+	return nil
+}
+
+func (b *Builder) Concurrency() int {
+	return b.GoogleCloudBuild.Concurrency
 }
 
 func (b *Builder) buildArtifactWithCloudBuild(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	cbclient, err := gcp.CloudBuildClient()
+	// TODO: [#4922] Implement required artifact resolution from the `artifactStore`
+	cbclient, err := cloudbuild.NewService(ctx, gcp.ClientOptions()...)
 	if err != nil {
-		return "", errors.Wrap(err, "getting cloudbuild client")
+		return "", fmt.Errorf("getting cloudbuild client: %w", err)
 	}
 
-	c, err := gcp.CloudStorageClient()
+	c, err := cstorage.NewClient(ctx, gcp.ClientOptions()...)
 	if err != nil {
-		return "", errors.Wrap(err, "getting cloud storage client")
+		return "", fmt.Errorf("getting cloud storage client: %w", err)
 	}
 	defer c.Close()
 
 	projectID := b.ProjectID
 	if projectID == "" {
-		guessedProjectID, err := gcp.ExtractProjectID(artifact.ImageName)
+		guessedProjectID, err := gcp.ExtractProjectID(tag)
 		if err != nil {
-			return "", errors.Wrap(err, "extracting projectID from image name")
+			return "", fmt.Errorf("extracting projectID from image name: %w", err)
 		}
 
 		projectID = guessedProjectID
@@ -75,36 +88,48 @@ func (b *Builder) buildArtifactWithCloudBuild(ctx context.Context, out io.Writer
 	buildObject := fmt.Sprintf("source/%s-%s.tar.gz", projectID, util.RandomID())
 
 	if err := b.createBucketIfNotExists(ctx, c, projectID, cbBucket); err != nil {
-		return "", errors.Wrap(err, "creating bucket if not exists")
+		return "", fmt.Errorf("creating bucket if not exists: %w", err)
 	}
 	if err := b.checkBucketProjectCorrect(ctx, c, projectID, cbBucket); err != nil {
-		return "", errors.Wrap(err, "checking bucket is in correct project")
+		return "", fmt.Errorf("checking bucket is in correct project: %w", err)
 	}
 
-	dependencies, err := b.DependenciesForArtifact(ctx, artifact)
+	dependencies, err := build.DependenciesForArtifact(ctx, artifact, b.cfg, b.artifactStore)
 	if err != nil {
-		return "", errors.Wrapf(err, "getting dependencies for %s", artifact.ImageName)
+		return "", fmt.Errorf("getting dependencies for %q: %w", artifact.ImageName, err)
 	}
 
 	color.Default.Fprintf(out, "Pushing code to gs://%s/%s\n", cbBucket, buildObject)
+
+	// Upload entire workspace for Jib projects to fix multi-module bug
+	// https://github.com/GoogleContainerTools/skaffold/issues/3477
+	// TODO: Avoid duplication (every Jib artifact will upload the entire workspace)
+	if artifact.JibArtifact != nil {
+		deps, err := jibAddWorkspaceToDependencies(artifact.Workspace, dependencies)
+		if err != nil {
+			return "", fmt.Errorf("walking workspace for Jib projects: %w", err)
+		}
+		dependencies = deps
+	}
+
 	if err := sources.UploadToGCS(ctx, c, artifact, cbBucket, buildObject, dependencies); err != nil {
-		return "", errors.Wrap(err, "uploading source tarball")
+		return "", fmt.Errorf("uploading source tarball: %w", err)
 	}
 
 	buildSpec, err := b.buildSpec(artifact, tag, cbBucket, buildObject)
 	if err != nil {
-		return "", errors.Wrap(err, "could not create build description")
+		return "", fmt.Errorf("could not create build description: %w", err)
 	}
 
 	call := cbclient.Projects.Builds.Create(projectID, &buildSpec)
 	op, err := call.Context(ctx).Do()
 	if err != nil {
-		return "", errors.Wrap(err, "could not create build")
+		return "", fmt.Errorf("could not create build: %w", err)
 	}
 
 	remoteID, err := getBuildID(op)
 	if err != nil {
-		return "", errors.Wrapf(err, "getting build ID from op")
+		return "", fmt.Errorf("getting build ID from op: %w", err)
 	}
 	logsObject := fmt.Sprintf("log-%s.txt", remoteID)
 	color.Default.Fprintf(out, "Logs are available at \nhttps://console.cloud.google.com/m/cloudstorage/b/%s/o/%s\n", cbBucket, logsObject)
@@ -129,20 +154,23 @@ watch:
 			}
 			return false, err
 		}); waitErr != nil {
-			return "", errors.Wrap(waitErr, "getting build status")
+			return "", fmt.Errorf("getting build status: %w", waitErr)
+		}
+		if err != nil {
+			return "", fmt.Errorf("getting build status: %w", err)
 		}
 		if cb == nil {
-			return "", errors.Wrap(err, "getting build status")
+			return "", errors.New("getting build status")
 		}
 
 		r, err := b.getLogs(ctx, c, offset, cbBucket, logsObject)
 		if err != nil {
-			return "", errors.Wrap(err, "getting logs")
+			return "", fmt.Errorf("getting logs: %w", err)
 		}
 		if r != nil {
 			written, err := io.Copy(out, r)
 			if err != nil {
-				return "", errors.Wrap(err, "copying logs to stdout")
+				return "", fmt.Errorf("copying logs to stdout: %w", err)
 			}
 			offset += written
 			r.Close()
@@ -150,9 +178,9 @@ watch:
 		switch cb.Status {
 		case StatusQueued, StatusWorking, StatusUnknown:
 		case StatusSuccess:
-			digest, err = getDigest(cb, tag)
+			digest, err = b.getDigest(cb, tag)
 			if err != nil {
-				return "", errors.Wrap(err, "getting image id from finished build")
+				return "", fmt.Errorf("getting image id from finished build: %w", err)
 			}
 			break watch
 		case StatusFailure, StatusInternalError, StatusTimeout, StatusCancelled:
@@ -165,11 +193,11 @@ watch:
 	}
 
 	if err := c.Bucket(cbBucket).Object(buildObject).Delete(ctx); err != nil {
-		return "", errors.Wrap(err, "cleaning up source tar after build")
+		return "", fmt.Errorf("cleaning up source tar after build: %w", err)
 	}
 	logrus.Infof("Deleted object %s", buildObject)
 
-	return tag + "@" + digest, nil
+	return build.TagWithDigest(tag, digest), nil
 }
 
 func getBuildID(op *cloudbuild.Operation) (string, error) {
@@ -186,15 +214,15 @@ func getBuildID(op *cloudbuild.Operation) (string, error) {
 	return buildMeta.Build.Id, nil
 }
 
-func getDigest(b *cloudbuild.Build, defaultToTag string) (string, error) {
-	if b.Results != nil && len(b.Results.Images) == 1 {
-		return b.Results.Images[0].Digest, nil
+func (b *Builder) getDigest(cb *cloudbuild.Build, defaultToTag string) (string, error) {
+	if cb.Results != nil && len(cb.Results.Images) == 1 {
+		return cb.Results.Images[0].Digest, nil
 	}
 
 	// The build steps pushed the image directly like when we use Jib.
 	// Retrieve the digest for that tag.
 	// TODO(dgageot): I don't think GCB can push to an insecure registry.
-	return docker.RemoteDigest(defaultToTag, nil)
+	return docker.RemoteDigest(defaultToTag, b.cfg)
 }
 
 func (b *Builder) getLogs(ctx context.Context, c *cstorage.Client, offset int64, bucket, objectName string) (io.ReadCloser, error) {
@@ -212,7 +240,7 @@ func (b *Builder) getLogs(ctx context.Context, c *cstorage.Client, offset int64,
 			logrus.Debugf("Logs for %s %s not uploaded yet...", bucket, objectName)
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "unknown error")
+		return nil, fmt.Errorf("unknown error: %w", err)
 	}
 	return r, nil
 }
@@ -225,10 +253,10 @@ func (b *Builder) checkBucketProjectCorrect(ctx context.Context, c *cstorage.Cli
 	for {
 		attrs, err := it.Next()
 		if err == iterator.Done {
-			return errors.Wrap(err, "bucket not found")
+			return fmt.Errorf("bucket not found: %w", err)
 		}
 		if err != nil {
-			return errors.Wrap(err, "iterating over buckets")
+			return fmt.Errorf("iterating over buckets: %w", err)
 		}
 		// Since we can't filter on bucket name specifically, only prefix, we need to check equality here and not just prefix
 		if attrs.Name == bucket {
@@ -248,7 +276,7 @@ func (b *Builder) createBucketIfNotExists(ctx context.Context, c *cstorage.Clien
 	}
 
 	if err != cstorage.ErrBucketNotExist {
-		return errors.Wrapf(err, "getting bucket %s", bucket)
+		return fmt.Errorf("getting bucket %q: %w", bucket, err)
 	}
 
 	err = c.Bucket(bucket).Create(ctx, projectID, &cstorage.BucketAttrs{

@@ -30,5 +30,17 @@ type ContextConfig struct {
 	DefaultRepo        string   `yaml:"default-repo,omitempty"`
 	LocalCluster       *bool    `yaml:"local-cluster,omitempty"`
 	InsecureRegistries []string `yaml:"insecure-registries,omitempty"`
-	UpdateCheck        *bool    `yaml:"update-check,omitempty"`
+	// DebugHelpersRegistry is the registry from which the debug helper images are used.
+	DebugHelpersRegistry string        `yaml:"debug-helpers-registry,omitempty"`
+	UpdateCheck          *bool         `yaml:"update-check,omitempty"`
+	Survey               *SurveyConfig `yaml:"survey,omitempty"`
+	KindDisableLoad      *bool         `yaml:"kind-disable-load,omitempty"`
+	K3dDisableLoad       *bool         `yaml:"k3d-disable-load,omitempty"`
+}
+
+// SurveyConfig is the survey config information
+type SurveyConfig struct {
+	DisablePrompt *bool  `yaml:"disable-prompt,omitempty"`
+	LastTaken     string `yaml:"last-taken,omitempty"`
+	LastPrompted  string `yaml:"last-prompted,omitempty"`
 }

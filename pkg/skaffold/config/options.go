@@ -18,6 +18,7 @@ package config
 
 import (
 	"strings"
+	"time"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 )
@@ -29,26 +30,45 @@ type PortForwardOptions struct {
 	ForwardPods bool
 }
 
+// WaitForDeletions configures the wait for pending deletions.
+type WaitForDeletions struct {
+	Max     time.Duration
+	Delay   time.Duration
+	Enabled bool
+}
+
 // SkaffoldOptions are options that are set by command line arguments not included
 // in the config file itself
 type SkaffoldOptions struct {
-	ConfigurationFile  string
-	GlobalConfig       string
-	Cleanup            bool
-	Notification       bool
-	Tail               bool
-	TailDev            bool
-	SkipTests          bool
-	CacheArtifacts     bool
-	EnableRPC          bool
-	Force              bool
-	NoPrune            bool
-	NoPruneChildren    bool
-	StatusCheck        bool
-	AutoBuild          bool
-	AutoSync           bool
-	AutoDeploy         bool
-	RenderOnly         bool
+	ConfigurationFile     string
+	GlobalConfig          string
+	EventLogFile          string
+	Cleanup               bool
+	Notification          bool
+	Tail                  bool
+	SkipTests             bool
+	CacheArtifacts        bool
+	EnableRPC             bool
+	Force                 bool
+	NoPrune               bool
+	NoPruneChildren       bool
+	StatusCheck           bool
+	AutoBuild             bool
+	AutoSync              bool
+	AutoDeploy            bool
+	RenderOnly            bool
+	RenderOutput          string
+	ProfileAutoActivation bool
+	DryRun                bool
+	SkipRender            bool
+
+	// Add Skaffold-specific labels including runID, deployer labels, etc.
+	// `CustomLabels` are still applied if this is false. Must only be used in
+	// commands which don't deploy (e.g. `skaffold render`) since the runID
+	// label isn't available.
+	AddSkaffoldLabels bool
+	DetectMinikube    bool
+
 	PortForward        PortForwardOptions
 	CustomTag          string
 	Namespace          string
@@ -56,49 +76,52 @@ type SkaffoldOptions struct {
 	Trigger            string
 	KubeContext        string
 	KubeConfig         string
+	DigestSource       string
 	WatchPollInterval  int
-	DefaultRepo        string
+	DefaultRepo        StringOrUndefined
 	CustomLabels       []string
 	TargetImages       []string
 	Profiles           []string
 	InsecureRegistries []string
+	Muted              Muted
 	Command            string
 	RPCPort            int
 	RPCHTTPPort        int
+
+	// TODO(https://github.com/GoogleContainerTools/skaffold/issues/3668):
+	// remove minikubeProfile from here and instead detect it by matching the
+	// kubecontext API Server to minikube profiles
+	MinikubeProfile string
+
+	WaitForDeletions WaitForDeletions
 }
 
-// Labels returns a map of labels to be applied to all deployed
-// k8s objects during the duration of the run
-func (opts *SkaffoldOptions) Labels() map[string]string {
-	labels := map[string]string{}
+type RunMode string
 
-	if opts.Cleanup {
-		labels["skaffold.dev/cleanup"] = "true"
-	}
-	if opts.Tail || opts.TailDev {
-		labels["skaffold.dev/tail"] = "true"
-	}
-	if opts.Namespace != "" {
-		labels["skaffold.dev/namespace"] = opts.Namespace
-	}
-	if len(opts.Profiles) > 0 {
-		labels["skaffold.dev/profiles"] = strings.Join(opts.Profiles, "__")
-	}
-	for _, cl := range opts.CustomLabels {
-		l := strings.SplitN(cl, "=", 2)
-		if len(l) == 1 {
-			labels[l[0]] = ""
-			continue
-		}
-		labels[l[0]] = l[1]
-	}
-	return labels
+var RunModes = struct {
+	Build  RunMode
+	Dev    RunMode
+	Debug  RunMode
+	Run    RunMode
+	Deploy RunMode
+	Render RunMode
+}{
+	Build:  "build",
+	Dev:    "dev",
+	Debug:  "debug",
+	Run:    "run",
+	Deploy: "deploy",
+	Render: "render",
 }
 
 // Prune returns true iff the user did NOT specify the --no-prune flag,
 // and the user did NOT specify the --cache-artifacts flag.
 func (opts *SkaffoldOptions) Prune() bool {
 	return !opts.NoPrune && !opts.CacheArtifacts
+}
+
+func (opts *SkaffoldOptions) Mode() RunMode {
+	return RunMode(opts.Command)
 }
 
 func (opts *SkaffoldOptions) IsTargetImage(artifact *latest.Artifact) bool {

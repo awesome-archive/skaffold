@@ -18,7 +18,7 @@ To retrieve information about the Skaffold pipeline, the Skaffold API provides t
   
   * A snapshot of the [overall state]({{< relref "#state-api" >}}) of the pipeline at any given time during the run.
 
-To control the individual phases of the Skaffold, the Skaffold API provides [fine grained control]({{< relref "#controlling-build-sync-deploy" >}})
+To control the individual phases of the Skaffold, the Skaffold API provides [fine-grained control]({{< relref "#controlling-build-sync-deploy" >}})
 over the individual phases of the pipeline (build, deploy, and sync).
 
 
@@ -31,7 +31,7 @@ For reference, we generate the server's [gRPC service definitions and message pr
 
 
 ### HTTP server
-The HTTP API is exposed on port `50052` by default. The default HTTP port can be overriden with the `--rpc-http-port` flag. 
+The HTTP API is exposed on port `50052` by default. The default HTTP port can be overridden with the `--rpc-http-port` flag. 
 If the HTTP API port is taken, Skaffold will find the next available port.
 The final port can be found from Skaffold's startup logs.
 
@@ -42,7 +42,7 @@ WARN[0000] port 50052 for gRPC HTTP server already in use: using 50055 instead
 
 ### gRPC Server
 
-The gRPC API is exposed on port `50051` by default and can be overriden with the `--rpc-port` flag.
+The gRPC API is exposed on port `50051` by default and can be overridden with the `--rpc-port` flag.
 As with the HTTP API, if this port is taken, Skaffold will find the next available port.
 You can find this port from Skaffold's logs on startup.
 
@@ -104,7 +104,7 @@ kick off a suite of Selenium tests against the newly deployed service.
 
 | protocol | endpoint | encoding |
 | ---- | --- | --- |
-| HTTP | `http://localhost:{HTTP_RPC_PORT}/v1/events` | newline separated JSON using chunk transfer encoding over HTTP|  
+| HTTP | `http://localhost:{HTTP_RPC_PORT}/v1/events` | newline separated JSON using chunk transfer encoding over HTTP|
 | gRPC | `client.Events(ctx)` method on the [`SkaffoldService`]({{< relref "/docs/references/api#skaffoldservice">}}) | protobuf 3 over HTTP |
 
 
@@ -234,7 +234,7 @@ func main() {
 ### Control API
 
 By default, [`skaffold dev`]({{< relref "/docs/workflows/dev" >}}) will automatically build artifacts, deploy manifests and sync files on every source code change.
-However, individual actions can be gated off by user input through the Control API.
+However, this behavior can be paused and individual actions can be gated off by user input through the Control API.
 
 With this API, users can tell Skaffold to wait for user input before performing any of these actions,
 even if the requisite files were changed on the filesystem. By doing so, users can "queue up" changes while
@@ -242,7 +242,7 @@ they are iterating locally, and then have Skaffold rebuild and redeploy only whe
 useful when builds are happening more frequently than desired, when builds or deploys take a long time or
 are otherwise very costly, or when users want to integrate other tools with `skaffold dev`.
 
-The automation can be turned off with `--auto-build=false` flag for building, `--auto-deploy=false` flag for deploys, and the `--auto-sync=false` flag for file sync.
+The automation can be turned off or on using the Control API, or with `auto-build` flag for building, `auto-deploy` flag for deploys, and the `auto-sync` flag for file sync.
 If automation is turned off for a phase, Skaffold will wait for a request to the Control API before executing the associated action.
 
 Each time a request is sent to the Control API by the user, the specified actions in the payload are executed immediately.
@@ -250,10 +250,16 @@ This means that _even if there are new file changes_, Skaffold will wait for ano
 
 **Control API Contract**
 
-| protocol | endpoint |
-| ---- |  ---- | ---- |
+| protocol | endpoint | 
+| --- | --- |
 | HTTP, method: POST | `http://localhost:{HTTP_RPC_PORT}/v1/execute`, the [Execution Service]({{<relref "/docs/references/api/swagger#/SkaffoldService/Execute">}}) |
 | gRPC | `client.Execute(ctx)` method on the [`SkaffoldService`]({{< relref "/docs/references/api/grpc#skaffoldservice">}}) |
+| HTTP, method: PUT | `http://localhost:{HTTP_RPC_PORT}/v1/build/auto_execute`, the [Auto Build Service]({{<relref "/docs/references/api/swagger#/SkaffoldService/AutoBuild">}}) |
+| gRPC | `client.AutoBuild(ctx)` method on the [`SkaffoldService`]({{< relref "/docs/references/api/grpc#skaffoldservice">}}) |
+| HTTP, method: PUT | `http://localhost:{HTTP_RPC_PORT}/v1/sync/auto_execute`, the [Auto Sync Service]({{<relref "/docs/references/api/swagger#/SkaffoldService/AutoSync">}}) |
+| gRPC | `client.AutoSync(ctx)` method on the [`SkaffoldService`]({{< relref "/docs/references/api/grpc#skaffoldservice">}}) |
+| HTTP, method: PUT | `http://localhost:{HTTP_RPC_PORT}/v1/deploy/auto_execute`, the [Auto Deploy Service]({{<relref "/docs/references/api/swagger#/SkaffoldService/AutoDeploy">}}) |
+| gRPC | `client.AutoDeploy(ctx)` method on the [`SkaffoldService`]({{< relref "/docs/references/api/grpc#skaffoldservice">}}) |
 
 
 **Examples**
@@ -280,10 +286,17 @@ These steps can also be combined into a single request:
 curl -X POST http://localhost:50052/v1/execute -d '{"build": true, "deploy": true}'
 ``` 
 
+We can make Skaffold start noticing file changes automatically again by issuing the requests:
+
+```bash
+curl -X PUT http://localhost:50052/v1/build/auto_execute -d '{"enabled": true}'
+curl -X PUT http://localhost:50052/v1/deploy/auto_execute -d '{"enabled": true}'
+``` 
+
 {{% /tab %}}
 {{% tab "gRPC API" %}}
 To access the Control API via the `gRPC`, create [`gRPC` client]({{< relref "#creating-a-grpc-client" >}}) as before.
-Then, use the `client.Execute()` method with the desired payload:
+Then, use the `client.Execute()` method with the desired payload to trigger it once:
 
 ```golang
 func main() {
@@ -299,6 +312,24 @@ func main() {
     })
     if err != nil {
         log.Fatalf("error when trying to execute phases: %v", err)
+    }
+}
+```
+Use the `client.AutoBuild()`,`client.AutoSync()` and `client.AutoDeploy()` method to enable or disable auto build, auto sync and auto deploy:
+
+```golang
+func main() {
+    ctx, ctxCancel := context.WithCancel(context.Background())
+    defer ctxCancel()
+    // `client` is the gRPC client with connection to localhost:50051.
+    _, err = client.AutoBuild(ctx, &pb.TriggerRequest{
+		State: &pb.TriggerState{
+			Val: &pb.TriggerState_Enabled{
+				Enabled: true,
+			},
+		},
+	})    if err != nil {
+        log.Fatalf("error when trying to auto trigger phases: %v", err)
     }
 }
 ```

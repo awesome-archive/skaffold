@@ -17,18 +17,18 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/karrick/godirwalk"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
 )
 
 var (
@@ -40,17 +40,17 @@ var (
 func NewCmdFindConfigs() *cobra.Command {
 	return NewCmd("find-configs").
 		WithDescription("Find in a given directory all skaffold yamls files that are parseable or upgradeable with their versions.").
-		WithFlags(func(f *pflag.FlagSet) {
+		WithFlags([]*Flag{
 			// Default to current directory
-			f.StringVarP(&directory, "directory", "d", ".", "Root directory to lookup the config files.")
+			{Value: &directory, Name: "directory", Shorthand: "d", DefValue: ".", Usage: "Root directory to lookup the config files."},
 			// Output format of this Command
-			f.StringVarP(&format, "output", "o", "table", "Result format, default to table. [(-o|--output=)json|table]")
+			{Value: &format, Name: "output", Shorthand: "o", DefValue: "table", Usage: "Result format, default to table. [(-o|--output=)json|table]"},
 		}).
 		Hidden().
 		NoArgs(doFindConfigs)
 }
 
-func doFindConfigs(out io.Writer) error {
+func doFindConfigs(_ context.Context, out io.Writer) error {
 	pathToVersion, err := findConfigs(directory)
 	if err != nil {
 		return err
@@ -82,16 +82,17 @@ func doFindConfigs(out io.Writer) error {
 func findConfigs(directory string) (map[string]string, error) {
 	pathToVersion := make(map[string]string)
 
-	err := godirwalk.Walk(directory, &godirwalk.Options{
-		Callback: func(path string, info *godirwalk.Dirent) error {
-			// Find files ending in ".yaml" and parseable to skaffold config in the specified root directory recursively.
-			if !info.IsDir() && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
-				if cfg, err := schema.ParseConfig(path, false); err == nil {
-					pathToVersion[path] = cfg.GetVersion()
-				}
-			}
-			return nil
-		},
+	// Find files ending in ".yaml" and parseable to skaffold config in the specified root directory recursively.
+	isYaml := func(path string, info walk.Dirent) (bool, error) {
+		return !info.IsDir() && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")), nil
+	}
+
+	err := walk.From(directory).When(isYaml).Do(func(path string, _ walk.Dirent) error {
+		if cfgs, err := schema.ParseConfig(path); err == nil && len(cfgs) > 0 {
+			// all configs defined in the same file should have the same version
+			pathToVersion[path] = cfgs[0].GetVersion()
+		}
+		return nil
 	})
 
 	return pathToVersion, err

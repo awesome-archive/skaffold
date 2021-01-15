@@ -3,6 +3,7 @@ title: "Cloud Native Buildpacks"
 linkTitle: "Buildpacks"
 weight: 50
 featureId: build.buildpacks
+aliases: [/docs/how-tos/buildpacks]
 ---
 
 [Cloud Native Buildpacks](https://buildpacks.io/) enable building
@@ -21,12 +22,35 @@ To use Buildpacks, add a `buildpack` field to each artifact you specify in the
 `artifacts` part of the `build` section. `context` should be a path to
 your source.
 
+{{<alert title="Note">}}
+In Skaffold 1.11 (schema `v2beta5`), the singular `buildpack` field was renamed to `buildpacks`.
+{{</alert>}}
+
 The following options can optionally be configured:
 
 {{< schema root="BuildpackArtifact" >}}
 
+**Builder**
+
 `builder` is *required* and tells Skaffold which
 [Builder](https://buildpacks.io/docs/app-developer-guide/build-an-app/) to use.
+
+**Run Image**
+
+`runImage` is *optional* and will override the default [Run Image](https://buildpacks.io/docs/concepts/components/stack/).
+
+**Artifact Dependency**
+
+You can define dependency on other artifacts using the `requires` keyword. This can be useful to specify another artifact image as the `builder` or `runImage`.
+
+{{% readfile file="samples/builders/artifact-dependencies/buildpacks-local.yaml" %}}
+
+**User defined environment variables**
+
+`env` makes it possible to configure specific environment variables for buildpacks.
+Many buildpacks use environment variables to adjust their detection and the build phases,
+such as selecting specific versions of language runtimes.
+Note that user's current environment is not passed through to buildpacks.
 
 **Example**
 
@@ -52,7 +76,7 @@ Any paths in `Ignore` will be ignored by the skaffold file watcher, even if they
 
 ```yaml
 buildpack:
-  builder: "heroku/buildpacks"
+  builder: "gcr.io/buildpacks/builder:v1"
   dependencies:
     paths:
     - pkg/**
@@ -60,11 +84,3 @@ buildpack:
     ignore:
     - vendor/**
 ```
-
-### Limitations
-
-The container images produced by Cloud Native Buildpacks [cannot
-be configured by `skaffold debug` for debugging]({{< relref "/docs/workflows/debug#unsupported-container-entrypoints" >}}).
-These images use a `launcher` binary as an entrypoint to run commands
-that are specified in a set of configuration files, which cannot
-be altered by `debug`.

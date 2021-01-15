@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd/api"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
@@ -67,12 +66,12 @@ func TestGetAllPodNamespaces(t *testing.T) {
 					},
 				},
 			},
-			expected: []string{"", "ns", "ns2", "ns3"},
+			expected: []string{"ns", "ns2", "ns3"},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, "", func(t *testutil.T) {
-			t.Override(&context.CurrentConfig, func() (clientcmdapi.Config, error) {
+			t.Override(&context.CurrentConfig, func() (api.Config, error) {
 				return api.Config{
 					CurrentContext: test.currentContext,
 					Contexts: map[string]*api.Context{
@@ -81,7 +80,7 @@ func TestGetAllPodNamespaces(t *testing.T) {
 				}, nil
 			})
 
-			namespaces, err := GetAllPodNamespaces(test.argNamespace, test.cfg)
+			namespaces, err := GetAllPodNamespaces(test.argNamespace, []latest.Pipeline{test.cfg})
 
 			t.CheckNoError(err)
 			t.CheckDeepEqual(test.expected, namespaces)

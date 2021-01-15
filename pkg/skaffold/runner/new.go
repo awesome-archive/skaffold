@@ -17,9 +17,9 @@ limitations under the License.
 package runner
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
@@ -29,8 +29,14 @@ import (
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/local"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/helm"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/kpt"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/kubectl"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/kustomize"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/label"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
+	pkgkubectl "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
@@ -42,55 +48,67 @@ import (
 
 // NewForConfig returns a new SkaffoldRunner for a SkaffoldConfig
 func NewForConfig(runCtx *runcontext.RunContext) (*SkaffoldRunner, error) {
-	tagger, err := getTagger(runCtx)
+	event.InitializeState(runCtx.GetPipelines(), runCtx.GetKubeContext(), runCtx.AutoBuild(), runCtx.AutoDeploy(), runCtx.AutoSync())
+	event.LogMetaEvent()
+	kubectlCLI := pkgkubectl.NewCLI(runCtx, "")
+
+	tagger, err := tag.NewTaggerMux(runCtx)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing tag config")
+		return nil, fmt.Errorf("creating tagger: %w", err)
 	}
 
-	builder, err := getBuilder(runCtx)
+	store := build.NewArtifactStore()
+	var builder build.Builder
+	builder, err = build.NewBuilderMux(runCtx, store, func(p latest.Pipeline) (build.PipelineBuilder, error) {
+		return getBuilder(runCtx, store, p)
+	})
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing build config")
+		return nil, fmt.Errorf("creating builder: %w", err)
 	}
-
-	imagesAreLocal := false
-	if localBuilder, ok := builder.(*local.Builder); ok {
-		imagesAreLocal = !localBuilder.PushImages()
+	isLocalImage := func(imageName string) (bool, error) {
+		return isImageLocal(runCtx, imageName)
 	}
-
-	artifactCache, err := cache.NewCache(runCtx, imagesAreLocal, builder)
-	if err != nil {
-		return nil, errors.Wrap(err, "initializing cache")
-	}
-
-	tester := getTester(runCtx)
+	labeller := label.NewLabeller(runCtx.AddSkaffoldLabels(), runCtx.CustomLabels())
+	tester := getTester(runCtx, isLocalImage)
 	syncer := getSyncer(runCtx)
-
-	deployer, err := getDeployer(runCtx)
+	var deployer deploy.Deployer
+	deployer, err = getDeployer(runCtx, labeller.Labels())
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing deploy config")
+		return nil, fmt.Errorf("creating deployer: %w", err)
+	}
+	depLister := func(ctx context.Context, artifact *latest.Artifact) ([]string, error) {
+		buildDependencies, err := build.DependenciesForArtifact(ctx, artifact, runCtx, store)
+		if err != nil {
+			return nil, err
+		}
+
+		testDependencies, err := tester.TestDependencies()
+		if err != nil {
+			return nil, err
+		}
+
+		return append(buildDependencies, testDependencies...), nil
 	}
 
-	defaultLabeller := deploy.NewLabeller("")
-	// runCtx.Opts is last to let users override/remove any label
-	labellers := []deploy.Labeller{builder, deployer, tagger, defaultLabeller, &runCtx.Opts}
+	graph := build.ToArtifactGraph(runCtx.Artifacts())
+	artifactCache, err := cache.NewCache(runCtx, isLocalImage, depLister, graph, store)
+	if err != nil {
+		return nil, fmt.Errorf("initializing cache: %w", err)
+	}
 
-	builder, tester, deployer = WithTimings(builder, tester, deployer, runCtx.Opts.CacheArtifacts)
-	if runCtx.Opts.Notification {
+	builder, tester, deployer = WithTimings(builder, tester, deployer, runCtx.CacheArtifacts())
+	if runCtx.Notification() {
 		deployer = WithNotification(deployer)
 	}
 
-	trigger, err := trigger.NewTrigger(runCtx)
+	monitor := filemon.NewMonitor()
+	intents, intentChan := setupIntents(runCtx)
+	trigger, err := trigger.NewTrigger(runCtx, intents.IsAnyAutoEnabled)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating watch trigger")
+		return nil, fmt.Errorf("creating watch trigger: %w", err)
 	}
 
-	event.InitializeState(runCtx.Cfg.Build)
-
-	monitor := filemon.NewMonitor()
-
-	intentChan := make(chan bool, 1)
-
-	r := &SkaffoldRunner{
+	return &SkaffoldRunner{
 		builder:  builder,
 		tester:   tester,
 		deployer: deployer,
@@ -102,144 +120,148 @@ func NewForConfig(runCtx *runcontext.RunContext) (*SkaffoldRunner, error) {
 			Trigger:    trigger,
 			intentChan: intentChan,
 		},
-		changeSet: &changeSet{
-			rebuildTracker: make(map[string]*latest.Artifact),
-			resyncTracker:  make(map[string]*sync.Item),
-		},
-		labellers:            labellers,
-		defaultLabeller:      defaultLabeller,
-		portForwardResources: runCtx.Cfg.PortForward,
-		podSelector:          kubernetes.NewImageList(),
-		cache:                artifactCache,
-		runCtx:               runCtx,
-		intents:              newIntents(runCtx.Opts.AutoBuild, runCtx.Opts.AutoSync, runCtx.Opts.AutoDeploy),
-		imagesAreLocal:       imagesAreLocal,
-	}
-
-	if err := r.setupTriggerCallbacks(intentChan); err != nil {
-		return nil, errors.Wrapf(err, "setting up trigger callbacks")
-	}
-
-	return r, nil
+		artifactStore: store,
+		kubectlCLI:    kubectlCLI,
+		labeller:      labeller,
+		podSelector:   kubernetes.NewImageList(),
+		cache:         artifactCache,
+		runCtx:        runCtx,
+		intents:       intents,
+		isLocalImage:  isLocalImage,
+	}, nil
 }
 
-func (r *SkaffoldRunner) setupTriggerCallbacks(c chan bool) error {
-	if err := r.setupTriggerCallback("build", c); err != nil {
-		return err
-	}
-	if err := r.setupTriggerCallback("sync", c); err != nil {
-		return err
-	}
-	if err := r.setupTriggerCallback("deploy", c); err != nil {
-		return err
-	}
-	return nil
+func setupIntents(runCtx *runcontext.RunContext) (*intents, chan bool) {
+	intents := newIntents(runCtx.AutoBuild(), runCtx.AutoSync(), runCtx.AutoDeploy())
+
+	intentChan := make(chan bool, 1)
+	setupTrigger("build", intents.setBuild, intents.setAutoBuild, intents.getAutoBuild, server.SetBuildCallback, server.SetAutoBuildCallback, intentChan)
+	setupTrigger("sync", intents.setSync, intents.setAutoSync, intents.getAutoSync, server.SetSyncCallback, server.SetAutoSyncCallback, intentChan)
+	setupTrigger("deploy", intents.setDeploy, intents.setAutoDeploy, intents.getAutoDeploy, server.SetDeployCallback, server.SetAutoDeployCallback, intentChan)
+
+	return intents, intentChan
 }
 
-func (r *SkaffoldRunner) setupTriggerCallback(triggerName string, c chan<- bool) error {
-	var (
-		setIntent      func(bool)
-		trigger        bool
-		serverCallback func(func())
-	)
-
-	switch triggerName {
-	case "build":
-		setIntent = r.intents.setBuild
-		trigger = r.runCtx.Opts.AutoBuild
-		serverCallback = server.SetBuildCallback
-	case "sync":
-		setIntent = r.intents.setSync
-		trigger = r.runCtx.Opts.AutoSync
-		serverCallback = server.SetSyncCallback
-	case "deploy":
-		setIntent = r.intents.setDeploy
-		trigger = r.runCtx.Opts.AutoDeploy
-		serverCallback = server.SetDeployCallback
-	default:
-		return fmt.Errorf("unsupported trigger type when setting callbacks: %s", triggerName)
-	}
-
-	setIntent(true)
-
-	// if "auto" is set to false, we're in manual mode
-	if !trigger {
-		setIntent(false) // set the initial value of the intent to false
-		// give the server a callback to set the intent value when a user request is received
-		serverCallback(func() {
+func setupTrigger(triggerName string, setIntent func(bool), setAutoTrigger func(bool), getAutoTrigger func() bool, singleTriggerCallback func(func()), autoTriggerCallback func(func(bool)), c chan<- bool) {
+	setIntent(getAutoTrigger())
+	// give the server a callback to set the intent value when a user request is received
+	singleTriggerCallback(func() {
+		if !getAutoTrigger() { //if auto trigger is disabled, we're in manual mode
 			logrus.Debugf("%s intent received, calling back to runner", triggerName)
 			c <- true
 			setIntent(true)
-		})
-	}
-	return nil
+		}
+	})
+
+	// give the server a callback to update auto trigger value when a user request is received
+	autoTriggerCallback(func(val bool) {
+		logrus.Debugf("%s auto trigger update to %t received, calling back to runner", triggerName, val)
+		// signal chan only when auto trigger is set to true
+		if val {
+			c <- true
+		}
+		setAutoTrigger(val)
+		setIntent(val)
+	})
 }
 
-func getBuilder(runCtx *runcontext.RunContext) (build.Builder, error) {
+func isImageLocal(runCtx *runcontext.RunContext, imageName string) (bool, error) {
+	pipeline, found := runCtx.PipelineForImage(imageName)
+	if !found {
+		pipeline = runCtx.DefaultPipeline()
+	}
+	if pipeline.Build.GoogleCloudBuild != nil || pipeline.Build.Cluster != nil {
+		return false, nil
+	}
+
+	cl := runCtx.GetCluster()
+	var pushImages bool
+	if pipeline.Build.LocalBuild.Push == nil {
+		pushImages = cl.PushImages
+		logrus.Debugf("push value not present, defaulting to %t because cluster.PushImages is %t", pushImages, cl.PushImages)
+	} else {
+		pushImages = *pipeline.Build.LocalBuild.Push
+	}
+	return !pushImages, nil
+}
+
+// getBuilder creates a builder from a given RunContext and build pipeline type.
+func getBuilder(runCtx *runcontext.RunContext, store build.ArtifactStore, p latest.Pipeline) (build.PipelineBuilder, error) {
 	switch {
-	case runCtx.Cfg.Build.LocalBuild != nil:
+	case p.Build.LocalBuild != nil:
 		logrus.Debugln("Using builder: local")
-		return local.NewBuilder(runCtx)
+		builder, err := local.NewBuilder(runCtx, p.Build.LocalBuild)
+		if err != nil {
+			return nil, err
+		}
+		builder.ArtifactStore(store)
+		return builder, nil
 
-	case runCtx.Cfg.Build.GoogleCloudBuild != nil:
+	case p.Build.GoogleCloudBuild != nil:
 		logrus.Debugln("Using builder: google cloud")
-		return gcb.NewBuilder(runCtx), nil
+		builder := gcb.NewBuilder(runCtx, p.Build.GoogleCloudBuild)
+		builder.ArtifactStore(store)
+		return builder, nil
 
-	case runCtx.Cfg.Build.Cluster != nil:
+	case p.Build.Cluster != nil:
 		logrus.Debugln("Using builder: cluster")
-		return cluster.NewBuilder(runCtx)
+		builder, err := cluster.NewBuilder(runCtx, p.Build.Cluster)
+		if err != nil {
+			return nil, err
+		}
+		builder.ArtifactStore(store)
+		return builder, err
 
 	default:
-		return nil, fmt.Errorf("unknown builder for config %+v", runCtx.Cfg.Build)
+		return nil, fmt.Errorf("unknown builder for config %+v", p.Build)
 	}
 }
 
-func getTester(runCtx *runcontext.RunContext) test.Tester {
-	return test.NewTester(runCtx)
+func getTester(cfg test.Config, isLocalImage func(imageName string) (bool, error)) test.Tester {
+	return test.NewTester(cfg, isLocalImage)
 }
 
-func getSyncer(runCtx *runcontext.RunContext) sync.Syncer {
-	return sync.NewSyncer(runCtx)
+func getSyncer(cfg sync.Config) sync.Syncer {
+	return sync.NewSyncer(cfg)
 }
 
-func getDeployer(runCtx *runcontext.RunContext) (deploy.Deployer, error) {
-	switch {
-	case runCtx.Cfg.Deploy.HelmDeploy != nil:
-		return deploy.NewHelmDeployer(runCtx), nil
+func getDeployer(runCtx *runcontext.RunContext, labels map[string]string) (deploy.Deployer, error) {
+	deployerCfg := runCtx.Deployers()
 
-	case runCtx.Cfg.Deploy.KubectlDeploy != nil:
-		return deploy.NewKubectlDeployer(runCtx), nil
+	var deployers deploy.DeployerMux
+	for _, d := range deployerCfg {
+		if d.HelmDeploy != nil {
+			h, err := helm.NewDeployer(runCtx, labels, d.HelmDeploy)
+			if err != nil {
+				return nil, err
+			}
+			deployers = append(deployers, h)
+		}
 
-	case runCtx.Cfg.Deploy.KustomizeDeploy != nil:
-		return deploy.NewKustomizeDeployer(runCtx), nil
+		if d.KptDeploy != nil {
+			deployers = append(deployers, kpt.NewDeployer(runCtx, labels, d.KptDeploy))
+		}
 
-	default:
-		return nil, fmt.Errorf("unknown deployer for config %+v", runCtx.Cfg.Deploy)
+		if d.KubectlDeploy != nil {
+			deployer, err := kubectl.NewDeployer(runCtx, labels, d.KubectlDeploy)
+			if err != nil {
+				return nil, err
+			}
+			deployers = append(deployers, deployer)
+		}
+
+		if d.KustomizeDeploy != nil {
+			deployer, err := kustomize.NewDeployer(runCtx, labels, d.KustomizeDeploy)
+			if err != nil {
+				return nil, err
+			}
+			deployers = append(deployers, deployer)
+		}
 	}
-}
-
-func getTagger(runCtx *runcontext.RunContext) (tag.Tagger, error) {
-	t := runCtx.Cfg.Build.TagPolicy
-
-	switch {
-	case runCtx.Opts.CustomTag != "":
-		return &tag.CustomTag{
-			Tag: runCtx.Opts.CustomTag,
-		}, nil
-
-	case t.EnvTemplateTagger != nil:
-		return tag.NewEnvTemplateTagger(t.EnvTemplateTagger.Template)
-
-	case t.ShaTagger != nil:
-		return &tag.ChecksumTagger{}, nil
-
-	case t.GitTagger != nil:
-		return tag.NewGitCommit(t.GitTagger.Variant)
-
-	case t.DateTimeTagger != nil:
-		return tag.NewDateTimeTagger(t.DateTimeTagger.Format, t.DateTimeTagger.TimeZone), nil
-
-	default:
-		return nil, fmt.Errorf("unknown tagger for strategy %+v", t)
+	// avoid muxing overhead when only a single deployer is configured
+	if len(deployers) == 1 {
+		return deployers[0], nil
 	}
+
+	return deployers, nil
 }

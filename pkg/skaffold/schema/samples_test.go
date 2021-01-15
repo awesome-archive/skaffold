@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/validation"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
@@ -36,7 +36,7 @@ const (
 )
 
 var (
-	ignoredSamples = []string{"structureTest.yaml", "build.sh"}
+	ignoredSamples = []string{"structureTest.yaml", "build.sh", "globalConfig.yaml", "Dockerfile.app", "Dockerfile.base"}
 )
 
 // Test that every example can be parsed and produces a valid
@@ -49,7 +49,7 @@ func TestParseExamples(t *testing.T) {
 // Samples are skaffold.yaml fragments that are used
 // in the documentation.
 func TestParseSamples(t *testing.T) {
-	paths, err := findSamples(samplesRoot)
+	paths, err := walk.From(samplesRoot).WhenIsFile().CollectPaths()
 	if err != nil {
 		t.Fatalf("unable to list samples in %q", samplesRoot)
 	}
@@ -75,18 +75,21 @@ func TestParseSamples(t *testing.T) {
 
 func checkSkaffoldConfig(t *testutil.T, yaml []byte) {
 	configFile := t.TempFile("skaffold.yaml", yaml)
-	cfg, err := ParseConfig(configFile, true)
+	parsed, err := ParseConfigAndUpgrade(configFile, latest.Version)
 	t.CheckNoError(err)
-
-	err = defaults.Set(cfg.(*latest.SkaffoldConfig))
-	t.CheckNoError(err)
-
-	err = validation.Process(cfg.(*latest.SkaffoldConfig))
+	var cfgs []*latest.SkaffoldConfig
+	for _, p := range parsed {
+		cfg := p.(*latest.SkaffoldConfig)
+		err = defaults.Set(cfg, true)
+		t.CheckNoError(err)
+		cfgs = append(cfgs, cfg)
+	}
+	err = validation.Process(cfgs)
 	t.CheckNoError(err)
 }
 
 func parseConfigFiles(t *testing.T, root string) {
-	paths, err := findExamples(root)
+	paths, err := walk.From(root).WhenHasName("skaffold.yaml").CollectPaths()
 	if err != nil {
 		t.Fatalf("unable to list skaffold configuration files in %q", root)
 	}
@@ -105,32 +108,6 @@ func parseConfigFiles(t *testing.T, root string) {
 			checkSkaffoldConfig(t, buf)
 		})
 	}
-}
-
-func findSamples(root string) ([]string, error) {
-	var files []string
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() {
-			files = append(files, path)
-		}
-		return err
-	})
-
-	return files, err
-}
-
-func findExamples(root string) ([]string, error) {
-	var files []string
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() && info.Name() == "skaffold.yaml" {
-			files = append(files, path)
-		}
-		return err
-	})
-
-	return files, err
 }
 
 func addHeader(buf []byte) []byte {

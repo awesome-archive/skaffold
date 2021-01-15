@@ -30,21 +30,55 @@ type Artifact struct {
 	Tag       string `json:"tag"`
 }
 
+// ArtifactGraph is a map of [artifact image : artifact definition]
+type ArtifactGraph map[string]*latest.Artifact
+
+// ToArtifactGraph creates an instance of `ArtifactGraph` from `[]*latest.Artifact`
+func ToArtifactGraph(artifacts []*latest.Artifact) ArtifactGraph {
+	m := make(map[string]*latest.Artifact)
+	for _, a := range artifacts {
+		m[a.ImageName] = a
+	}
+	return m
+}
+
+// Dependencies returns the de-referenced slice of required artifacts for a given artifact
+func (g ArtifactGraph) Dependencies(a *latest.Artifact) []*latest.Artifact {
+	var sl []*latest.Artifact
+	for _, d := range a.Dependencies {
+		sl = append(sl, g[d.ImageName])
+	}
+	return sl
+}
+
 // Builder is an interface to the Build API of Skaffold.
 // It must build and make the resulting image accessible to the cluster.
 // This could include pushing to a authorized repository or loading the nodes with the image.
 // If artifacts is supplied, the builder should only rebuild those artifacts.
 type Builder interface {
-	Labels() map[string]string
-
 	Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]Artifact, error)
 
-	DependenciesForArtifact(ctx context.Context, artifact *latest.Artifact) ([]string, error)
-
-	// SyncMap provides a map of sync destinations by source paths.
-	SyncMap(ctx context.Context, artifact *latest.Artifact) (map[string][]string, error)
-
 	// Prune removes images built with Skaffold
+	Prune(context.Context, io.Writer) error
+}
+
+// PipelineBuilder is an interface for a specific Skaffold config pipeline build type.
+// Current implementations are the `local`, `cluster` and `gcb`
+type PipelineBuilder interface {
+
+	// PreBuild executes any one-time setup required prior to starting any build on this builder
+	PreBuild(ctx context.Context, out io.Writer) error
+
+	// Build returns the `ArtifactBuilder` based on this build pipeline type
+	Build(ctx context.Context, out io.Writer, artifact *latest.Artifact) ArtifactBuilder
+
+	// PostBuild executes any one-time teardown required after all builds on this builder are complete
+	PostBuild(ctx context.Context, out io.Writer) error
+
+	// Concurrency specifies the max number of builds that can run at any one time. If concurrency is 0, then all builds can run in parallel.
+	Concurrency() int
+
+	// Prune removes images built in this pipeline
 	Prune(context.Context, io.Writer) error
 }
 

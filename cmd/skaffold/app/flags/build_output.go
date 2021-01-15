@@ -22,8 +22,6 @@ import (
 	"io/ioutil"
 	"os"
 
-	"github.com/pkg/errors"
-
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
 )
 
@@ -49,17 +47,28 @@ func (t *BuildOutputFileFlag) Usage() string {
 
 // Set Implements Set() method for pflag interface
 func (t *BuildOutputFileFlag) Set(value string) error {
-	if _, err := os.Stat(value); os.IsNotExist(err) {
-		return err
+	var (
+		buf []byte
+		err error
+	)
+
+	if value == "-" {
+		buf, err = ioutil.ReadAll(os.Stdin)
+	} else {
+		if _, err := os.Stat(value); os.IsNotExist(err) {
+			return err
+		}
+		buf, err = ioutil.ReadFile(value)
 	}
-	b, err := ioutil.ReadFile(value)
 	if err != nil {
 		return err
 	}
-	buildOutput, err := ParseBuildOutput(b)
+
+	buildOutput, err := ParseBuildOutput(buf)
 	if err != nil {
-		return errors.Wrap(err, "setting template flag")
+		return fmt.Errorf("setting template flag: %w", err)
 	}
+
 	t.filename = value
 	t.buildOutput = *buildOutput
 	return nil

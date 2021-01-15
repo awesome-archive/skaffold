@@ -19,6 +19,7 @@ package portforward
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
@@ -34,7 +35,7 @@ type portForwardEntry struct {
 	localPort              int
 	automaticPodForwarding bool
 	terminated             bool
-	terminationLock        *sync.Mutex
+	terminationLock        sync.Mutex
 	cancel                 context.CancelFunc
 }
 
@@ -49,7 +50,6 @@ func newPortForwardEntry(resourceVersion int, resource latest.PortForwardResourc
 		ownerReference:         ownerReference,
 		localPort:              localPort,
 		automaticPodForwarding: automaticPodForwarding,
-		terminationLock:        &sync.Mutex{},
 	}
 }
 
@@ -58,12 +58,12 @@ func newPortForwardEntry(resourceVersion int, resource latest.PortForwardResourc
 // to be the same whenever pods restart
 func (p *portForwardEntry) key() string {
 	if p.automaticPodForwarding {
-		return fmt.Sprintf("%s-%s-%s-%s-%d", p.ownerReference, p.containerName, p.resource.Namespace, p.portName, p.resource.Port)
+		return fmt.Sprintf("%s-%s-%s-%s-%s", p.ownerReference, p.containerName, p.resource.Namespace, p.portName, p.resource.Port.String())
 	}
-	return fmt.Sprintf("%s-%s-%s-%d", p.resource.Type, p.resource.Name, p.resource.Namespace, p.resource.Port)
+	return fmt.Sprintf("%s-%s-%s-%s", strings.ToLower(string(p.resource.Type)), p.resource.Name, p.resource.Namespace, p.resource.Port.String())
 }
 
 // String is a utility function that returns the port forward entry as a user-readable string
 func (p *portForwardEntry) String() string {
-	return fmt.Sprintf("%s-%s-%s-%d", p.resource.Type, p.resource.Name, p.resource.Namespace, p.resource.Port)
+	return fmt.Sprintf("%s-%s-%s-%s", strings.ToLower(string(p.resource.Type)), p.resource.Name, p.resource.Namespace, p.resource.Port.String())
 }

@@ -24,13 +24,12 @@ import (
 	"regexp"
 	"strings"
 
-	hackschema "github.com/GoogleContainerTools/skaffold/hack/versions/pkg/schema"
-
 	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/hack/versions/pkg/version"
+	hackschema "github.com/GoogleContainerTools/skaffold/hack/versions/pkg/schema"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
 )
 
 // Before: prev -> current (latest)
@@ -40,19 +39,19 @@ func main() {
 	prev := strings.TrimPrefix(schema.SchemaVersions[len(schema.SchemaVersions)-2].APIVersion, "skaffold/")
 	logrus.Infof("Previous Skaffold version: %s", prev)
 
-	current, latestIsReleased := version.GetLatestVersion()
+	current, latestIsReleased := hackschema.GetLatestVersion()
 
 	if !latestIsReleased {
 		logrus.Fatalf("There is no need to create a new version, %s is still not released", current)
 	}
 
 	makeSchemaDir(current)
+
 	// Create a package for current version
-	walk(path("latest"), func(file string, info os.FileInfo) {
-		if !info.IsDir() {
-			cp(file, path(current, info.Name()))
-			sed(path(current, info.Name()), "package latest", "package "+current)
-		}
+	walk.From(path("latest")).WhenIsFile().MustDo(func(file string, info walk.Dirent) error {
+		cp(file, path(current, info.Name()))
+		sed(path(current, info.Name()), "package latest", "package "+current)
+		return nil
 	})
 
 	next := readNextVersion()
@@ -77,10 +76,15 @@ func main() {
 	hackschema.UpdateVersionComment(path("latest", "config.go"), false)
 
 	// Update skaffold.yaml in integration tests
-	walk("integration", func(path string, info os.FileInfo) {
-		if info.Name() == "skaffold.yaml" {
-			sed(path, current, next)
-		}
+	walk.From("integration").WhenHasName("skaffold.yaml").MustDo(func(path string, _ walk.Dirent) error {
+		sed(path, current, next)
+		return nil
+	})
+
+	// Update skaffold.yaml in init tests
+	walk.From("pkg/skaffold/initializer/testdata").WhenHasName("skaffold.yaml").MustDo(func(path string, _ walk.Dirent) error {
+		sed(path, current, next)
+		return nil
 	})
 
 	// Add the new version to the list of versions
@@ -165,16 +169,4 @@ func lines(path string) []string {
 		lines = append(lines, scanner.Text())
 	}
 	return lines
-}
-
-func walk(root string, fn func(path string, info os.FileInfo)) {
-	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		fn(path, info)
-		return nil
-	}); err != nil {
-		panic("unable to list files")
-	}
 }

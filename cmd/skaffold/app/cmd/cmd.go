@@ -23,7 +23,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -32,23 +31,32 @@ import (
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/instrumentation"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/server"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/survey"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/update"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/version"
 )
 
 var (
-	opts         config.SkaffoldOptions
-	v            string
-	forceColors  bool
-	defaultColor int
-	overwrite    bool
+	opts              config.SkaffoldOptions
+	v                 string
+	defaultColor      int
+	forceColors       bool
+	overwrite         bool
+	interactive       bool
+	timestamps        bool
+	shutdownAPIServer func() error
+)
+
+// Annotation for commands that should allow post execution housekeeping messages like updates and surveys
+const (
+	HouseKeepingMessagesAllowedAnnotation = "skaffold_annotation_housekeeping_allowed"
 )
 
 func NewSkaffoldCommand(out, err io.Writer) *cobra.Command {
-	updateMsg := make(chan string)
-	var shutdownAPIServer func() error
+	updateMsg := make(chan string, 1)
+	surveyPrompt := make(chan bool, 1)
 
 	rootCmd := &cobra.Command{
 		Use: "skaffold",
@@ -63,62 +71,65 @@ func NewSkaffoldCommand(out, err io.Writer) *cobra.Command {
 			cmd.Root().SilenceUsage = true
 
 			opts.Command = cmd.Use
+			instrumentation.SetCommand(cmd.Use)
 
-			// Setup colors
-			if forceColors {
-				color.ForceColors()
-			}
-			color.OverwriteDefault(color.Color(defaultColor))
+			out = color.SetupColors(out, defaultColor, forceColors)
 			cmd.Root().SetOutput(out)
 
 			// Setup logs
-			if err := setUpLogs(err, v); err != nil {
+			if err := setUpLogs(err, v, timestamps); err != nil {
 				return err
-			}
-
-			// In dev mode, the default is to enable the rpc server
-			if cmd.Use == "dev" && !cmd.Flag("enable-rpc").Changed {
-				opts.EnableRPC = true
-			}
-
-			// In dev mode, the default is to force deployments
-			if cmd.Use == "dev" && !cmd.Flag("force").Changed {
-				opts.Force = true
 			}
 
 			// Start API Server
 			shutdown, err := server.Initialize(opts)
 			if err != nil {
-				return errors.Wrap(err, "initializing api server")
+				return fmt.Errorf("initializing api server: %w", err)
 			}
 			shutdownAPIServer = shutdown
 
 			// Print version
 			version := version.Get()
 			logrus.Infof("Skaffold %+v", version)
-			event.LogSkaffoldMetadata(version)
-
-			if quietFlag {
-				logrus.Debugf("Update check is disabled because of quiet mode")
-			} else {
+			if !isHouseKeepingMessagesAllowed(cmd) {
+				logrus.Debugf("Disable housekeeping messages for command explicitly")
+				return nil
+			}
+			switch {
+			case !interactive:
+				logrus.Debugf("Update check and survey prompt disabled in non-interactive mode")
+			case quietFlag:
+				logrus.Debugf("Update check and survey prompt disabled in quiet mode")
+			case analyze:
+				logrus.Debugf("Update check and survey prompt disabled when running `init --analyze`")
+			default:
 				go func() {
-					if err := updateCheck(updateMsg, opts.GlobalConfig); err != nil {
+					msg, err := update.CheckVersion(opts.GlobalConfig)
+					if err != nil {
 						logrus.Infof("update check failed: %s", err)
+					} else if msg != "" {
+						updateMsg <- msg
 					}
+					surveyPrompt <- config.ShouldDisplayPrompt(opts.GlobalConfig)
 				}()
 			}
-
 			return nil
 		},
 		PersistentPostRun: func(cmd *cobra.Command, args []string) {
 			select {
 			case msg := <-updateMsg:
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\n", msg)
+				fmt.Fprintf(cmd.OutOrStderr(), "%s\n", msg)
 			default:
 			}
-
-			if shutdownAPIServer != nil {
-				shutdownAPIServer()
+			// check if survey prompt needs to be displayed
+			select {
+			case shouldDisplay := <-surveyPrompt:
+				if shouldDisplay {
+					if err := survey.New(opts.GlobalConfig).DisplaySurveyPrompt(cmd.OutOrStdout()); err != nil {
+						fmt.Fprintf(cmd.OutOrStderr(), "%v\n", err)
+					}
+				}
+			default:
 			}
 		},
 	}
@@ -136,6 +147,7 @@ func NewSkaffoldCommand(out, err io.Writer) *cobra.Command {
 			Message: "Pipeline building blocks for CI/CD:",
 			Commands: []*cobra.Command{
 				NewCmdBuild(),
+				NewCmdTest(),
 				NewCmdDeploy(),
 				NewCmdDelete(),
 				NewCmdRender(),
@@ -159,13 +171,19 @@ func NewSkaffoldCommand(out, err io.Writer) *cobra.Command {
 	rootCmd.AddCommand(NewCmdDiagnose())
 	rootCmd.AddCommand(NewCmdOptions())
 	rootCmd.AddCommand(NewCmdCredits())
+	rootCmd.AddCommand(NewCmdSchema())
+	rootCmd.AddCommand(NewCmdFilter())
 
 	rootCmd.AddCommand(NewCmdGeneratePipeline())
+	rootCmd.AddCommand(NewCmdSurvey())
 
 	templates.ActsAsRootCommand(rootCmd, nil, groups...)
 	rootCmd.PersistentFlags().StringVarP(&v, "verbosity", "v", constants.DefaultLogLevel.String(), "Log level (debug, info, warn, error, fatal, panic)")
-	rootCmd.PersistentFlags().IntVar(&defaultColor, "color", int(color.Default), "Specify the default output color in ANSI escape codes")
+	rootCmd.PersistentFlags().IntVar(&defaultColor, "color", int(color.DefaultColorCode), "Specify the default output color in ANSI escape codes")
 	rootCmd.PersistentFlags().BoolVar(&forceColors, "force-colors", false, "Always print color codes (hidden)")
+	rootCmd.PersistentFlags().BoolVar(&interactive, "interactive", true, "Allow user prompts for more information")
+	rootCmd.PersistentFlags().BoolVar(&update.EnableCheck, "update-check", true, "Check for a more recent version of Skaffold")
+	rootCmd.PersistentFlags().BoolVar(&timestamps, "timestamps", false, "Print timestamps in logs.")
 	rootCmd.PersistentFlags().MarkHidden("force-colors")
 
 	setFlagsFromEnvVariables(rootCmd)
@@ -183,21 +201,6 @@ func NewCmdOptions() *cobra.Command {
 	templates.UseOptionsTemplates(cmd)
 
 	return cmd
-}
-
-func updateCheck(ch chan string, configfile string) error {
-	if !update.IsUpdateCheckEnabled(configfile) {
-		logrus.Debugf("Update check not enabled, skipping.")
-		return nil
-	}
-	latest, current, err := update.GetLatestAndCurrentVersion()
-	if err != nil {
-		return errors.Wrap(err, "get latest and current Skaffold version")
-	}
-	if latest.GT(current) {
-		ch <- fmt.Sprintf("There is a new version (%s) of Skaffold available. Download it at %s\n", latest, constants.LatestDownloadURL)
-	}
-	return nil
 }
 
 // Each flag can also be set with an env variable whose name starts with `SKAFFOLD_`.
@@ -230,13 +233,16 @@ func FlagToEnvVarName(f *pflag.Flag) string {
 	return fmt.Sprintf("SKAFFOLD_%s", strings.Replace(strings.ToUpper(f.Name), "-", "_", -1))
 }
 
-func setUpLogs(stdErr io.Writer, level string) error {
+func setUpLogs(stdErr io.Writer, level string, timestamp bool) error {
 	logrus.SetOutput(stdErr)
 	lvl, err := logrus.ParseLevel(level)
 	if err != nil {
-		return errors.Wrap(err, "parsing log level")
+		return fmt.Errorf("parsing log level: %w", err)
 	}
 	logrus.SetLevel(lvl)
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: timestamp,
+	})
 	return nil
 }
 
@@ -246,4 +252,18 @@ func alwaysSucceedWhenCancelled(ctx context.Context, err error) error {
 		return nil
 	}
 	return err
+}
+
+func isHouseKeepingMessagesAllowed(cmd *cobra.Command) bool {
+	if cmd.Annotations == nil {
+		return false
+	}
+	return cmd.Annotations[HouseKeepingMessagesAllowedAnnotation] == "true"
+}
+
+func allowHouseKeepingMessages(cmd *cobra.Command) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = make(map[string]string)
+	}
+	cmd.Annotations[HouseKeepingMessagesAllowedAnnotation] = "true"
 }

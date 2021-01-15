@@ -44,6 +44,14 @@ Which is equivalent to:
 
 {{% readfile file="samples/builders/local-full.yaml" %}}
 
+**Artifact dependency**
+
+You can additionally define dependency on other artifacts using the `requires` expression:
+
+{{% readfile file="samples/builders/artifact-dependencies/docker-local.yaml" %}}
+
+The specified alias `IMAGE2` becomes available as a build-arg in the Dockerfile for `image1` and its value automatically set to the image built from `image2`.
+
 ## Dockerfile in-cluster with Kaniko
 
 [Kaniko](https://github.com/GoogleContainerTools/kaniko) is a Google-developed
@@ -62,24 +70,27 @@ To use Kaniko, add build type `kaniko` to the `build` section of
 
 {{< schema root="KanikoArtifact" >}}
 
-The `buildContext` can be either:
+**Artifact dependency**
 
-{{< schema root="KanikoBuildContext" >}}
+Similar to the local Docker builder, you can define dependency on other artifacts using the `requires` expression:
+
+{{% readfile file="samples/builders/artifact-dependencies/kaniko.yaml" %}}
+
+The specified alias `IMAGE2` becomes available as a build-arg in the Dockerfile for `image1` and its value automatically set to the image built from `image2`.
 
 Since Kaniko builds images directly to a registry, it requires active cluster credentials.
 These credentials are configured in the `cluster` section with the following options:
 
 {{< schema root="ClusterDetails" >}}
 
-To set up the credentials for Kaniko refer to the [kaniko docs](https://github.com/GoogleContainerTools/kaniko#kubernetes-secret).
-The recommended way is to store the pull secret in Kubernetes and configure `pullSecretName`.
-Alternatively, the path to a credentials file can be set with the `pullSecret` option:
+To set up the credentials for Kaniko refer to the [kaniko docs](https://github.com/GoogleContainerTools/kaniko#kubernetes-secret) (**Note**: Rename the downloaded JSON key to *kaniko-secret* without appending *.json*).
+Alternatively, the path to a credentials file can be set with the `pullSecretPath` option:
 ```yaml
 build:
   cluster:
     pullSecretName: pull-secret-in-kubernetes
     # OR
-    pullSecret: path-to-service-account-key-file
+    pullSecretPath: path-to-service-account-key-file
 ```
 Similarly, when pushing to a docker registry:
 ```yaml
@@ -100,11 +111,15 @@ Docker image `gcr.io/k8s-skaffold/example` with Kaniko:
 {{% readfile file="samples/builders/kaniko.yaml" %}}
 
 ## Dockerfile remotely with Google Cloud Build
+
 Skaffold can build the Dockerfile image remotely with [Google Cloud Build]({{<relref "/docs/pipeline-stages/builders#remotely-on-google-cloud-build">}}).
 
 **Configuration**
 
-To configure, add `googleCloudBuild` to  `build` section to `skaffold.yaml`
+To configure, add `googleCloudBuild` to `build` section to `skaffold.yaml`.
+The following options can optionally be configured:
+
+{{< schema root="GoogleCloudBuild" >}}
 
 **Example**
 

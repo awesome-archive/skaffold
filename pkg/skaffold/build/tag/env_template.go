@@ -17,12 +17,11 @@ limitations under the License.
 package tag
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"text/template"
 
-	"github.com/pkg/errors"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
@@ -35,7 +34,7 @@ type envTemplateTagger struct {
 func NewEnvTemplateTagger(t string) (Tagger, error) {
 	tmpl, err := util.ParseEnvTemplate(t)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing template")
+		return nil, fmt.Errorf("parsing template: %w", err)
 	}
 
 	return &envTemplateTagger{
@@ -43,14 +42,9 @@ func NewEnvTemplateTagger(t string) (Tagger, error) {
 	}, nil
 }
 
-func (t *envTemplateTagger) Labels() map[string]string {
-	return map[string]string{
-		constants.Labels.TagPolicy: "envTemplateTagger",
-	}
-}
-
-// GenerateFullyQualifiedImageName tags an image with the custom tag
-func (t *envTemplateTagger) GenerateFullyQualifiedImageName(workingDir, imageName string) (string, error) {
+// GenerateTag generates a tag from a template referencing environment variables.
+func (t *envTemplateTagger) GenerateTag(_, imageName string) (string, error) {
+	// missingkey=error throws error when map is indexed with an undefined key
 	tag, err := util.ExecuteEnvTemplate(t.Template.Option("missingkey=error"), map[string]string{
 		"IMAGE_NAME":  imageName,
 		"DIGEST":      "_DEPRECATED_DIGEST_",

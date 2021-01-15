@@ -26,17 +26,10 @@ import (
 )
 
 func TestDiagnose(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-	if ShouldRunGCPOnlyTests() {
-		t.Skip("skipping test that is not gcp only")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	examples, err := folders("examples")
-	if err != nil {
-		t.Fatal("unable to list examples")
-	}
+	failNowIfError(t, err)
 	if len(examples) == 0 {
 		t.Fatal("didn't find any example")
 	}

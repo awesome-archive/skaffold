@@ -11,6 +11,7 @@ End-to-end pipelines:
 
 * [skaffold run](#skaffold-run) - to build & deploy once
 * [skaffold dev](#skaffold-dev) - to trigger the watch loop build & deploy workflow with cleanup on exit
+* [skaffold debug](#skaffold-debug) - to run a pipeline in debug mode
 
 Pipeline building blocks for CI/CD:
 
@@ -30,7 +31,9 @@ Other Commands:
 * [skaffold version](#skaffold-version) - get Skaffold version
 * [skaffold completion](#skaffold-completion) - setup tab completion for the CLI
 * [skaffold config](#skaffold-config) - manage context specific parameters
+* [skaffold credits](#skaffold-credits) - export third party notices to given path (./skaffold-credits by default)
 * [skaffold diagnose](#skaffold-diagnose) - diagnostics of Skaffold works in your project
+* [skaffold schema](#skaffold-schema) - list and print json schemas used to validate skaffold.yaml configuration
 
 
 ## Global flags
@@ -70,19 +73,22 @@ End-to-end pipelines:
 
 Pipeline building blocks for CI/CD:
   build             Build the artifacts
+  test              Run tests against your built application images
   deploy            Deploy pre-built artifacts
   delete            Delete the deployed application
   render            [alpha] Perform all image builds, and output rendered Kubernetes manifests
 
 Getting started with a new project:
   init              [alpha] Generate configuration for deploying an application
-  fix               Update old configuration to newest schema version
+  fix               Update old configuration to a newer schema version
 
 Other Commands:
   completion        Output shell completion for the given shell (bash or zsh)
   config            Interact with the Skaffold configuration
   credits           Export third party notices to given path (./skaffold-credits by default)
   diagnose          Run a diagnostic on Skaffold
+  schema            List and print json schemas used to validate skaffold.yaml configuration
+  survey            Opens a web browser to fill out the Skaffold survey
   version           Print the version information
 
 Use "skaffold <command> --help" for more information about a given command.
@@ -93,6 +99,9 @@ Use "skaffold options" for a list of global command-line options (applies to all
 Env vars:
 
 * `SKAFFOLD_COLOR` (same as `--color`)
+* `SKAFFOLD_INTERACTIVE` (same as `--interactive`)
+* `SKAFFOLD_TIMESTAMPS` (same as `--timestamps`)
+* `SKAFFOLD_UPDATE_CHECK` (same as `--update-check`)
 * `SKAFFOLD_VERBOSITY` (same as `--verbosity`)
 
 ### skaffold build
@@ -116,27 +125,36 @@ Examples:
   skaffold build -q > build_result.json
 
   # Build the artifacts and then deploy them
-  skaffold build -q > skaffold deploy
+  skaffold build -q | skaffold deploy --build-artifacts -
+
+  # Print the final image names
+  skaffold build -q --dry-run
 
 Options:
-  -b, --build-image=[]: Choose which artifacts to build. Artifacts with image names that contain the expression will be built only. Default is to build sources for all artifacts
+  -b, --build-image=[]: Only build artifacts with image names that contain the given substring. Default is to build sources for all artifacts
       --cache-artifacts=true: Set to false to disable default caching of artifacts
       --cache-file='': Specify the location of the cache file (default $HOME/.skaffold/cache)
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
+      --dry-run=false: Don't build images, just compute the tag for each artifact.
       --enable-rpc=false: Enable gRPC for exposing Skaffold events (true by default for `skaffold dev`)
+      --event-log-file='': Save Skaffold events to the provided file after skaffold has finished executing, requires --enable-rpc=true
       --file-output='': Filename to write build images to
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
       --insecure-registry=[]: Target registries for built images which are not secure
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
+      --mute-logs=[]: mute logs for specified stages in pipeline (build, deploy, status-check, none, all)
   -n, --namespace='': Run deployments in the specified namespace
   -o, --output={{json .}}: Used in conjunction with --quiet flag. Format output with go-template. For full struct documentation, see https://godoc.org/github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/flags#BuildOutput
-  -p, --profile=[]: Activate profiles by name
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
   -q, --quiet=false: Suppress the build output and print image built on success. See --output to format output.
       --rpc-http-port=50052: tcp port to expose event REST API over HTTP
       --rpc-port=50051: tcp port to expose event API
       --skip-tests=false: Whether to skip the tests after building
+  -t, --tag='': The optional custom tag to use for images which overrides the current Tagger configuration
       --toot=false: Emit a terminal beep after the deploy is complete
 
 Usage:
@@ -153,19 +171,25 @@ Env vars:
 * `SKAFFOLD_CACHE_FILE` (same as `--cache-file`)
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
+* `SKAFFOLD_DRY_RUN` (same as `--dry-run`)
 * `SKAFFOLD_ENABLE_RPC` (same as `--enable-rpc`)
+* `SKAFFOLD_EVENT_LOG_FILE` (same as `--event-log-file`)
 * `SKAFFOLD_FILE_OUTPUT` (same as `--file-output`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_INSECURE_REGISTRY` (same as `--insecure-registry`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
+* `SKAFFOLD_MUTE_LOGS` (same as `--mute-logs`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
 * `SKAFFOLD_OUTPUT` (same as `--output`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 * `SKAFFOLD_QUIET` (same as `--quiet`)
 * `SKAFFOLD_RPC_HTTP_PORT` (same as `--rpc-http-port`)
 * `SKAFFOLD_RPC_PORT` (same as `--rpc-port`)
 * `SKAFFOLD_SKIP_TESTS` (same as `--skip-tests`)
+* `SKAFFOLD_TAG` (same as `--tag`)
 * `SKAFFOLD_TOOT` (same as `--toot`)
 
 ### skaffold completion
@@ -323,23 +347,35 @@ Options:
       --cleanup=true: Delete deployments after dev or debug mode is interrupted
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
       --enable-rpc=false: Enable gRPC for exposing Skaffold events (true by default for `skaffold dev`)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
-      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime! (true by default for `skaffold dev`)
+      --event-log-file='': Save Skaffold events to the provided file after skaffold has finished executing, requires --enable-rpc=true
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime!
       --insecure-registry=[]: Target registries for built images which are not secure
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
   -l, --label=[]: Add custom labels to deployed objects. Set multiple times for multiple labels
+      --mute-logs=[]: mute logs for specified stages in pipeline (build, deploy, status-check, none, all)
   -n, --namespace='': Run deployments in the specified namespace
       --no-prune=false: Skip removing images and containers built by Skaffold
       --no-prune-children=false: Skip removing layers reused by Skaffold
       --port-forward=false: Port-forward exposed container ports within pods
-  -p, --profile=[]: Activate profiles by name
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
       --rpc-http-port=50052: tcp port to expose event REST API over HTTP
       --rpc-port=50051: tcp port to expose event API
       --skip-tests=false: Whether to skip the tests after building
-      --tail=true: Stream logs from deployed objects
+      --status-check=true: Wait for deployed resources to stabilize
+  -t, --tag='': The optional custom tag to use for images which overrides the current Tagger configuration
+      --tail=false: Stream logs from deployed objects (true by default for `skaffold dev` and `skaffold debug`)
       --toot=false: Emit a terminal beep after the deploy is complete
+      --trigger='notify': How is change detection triggered? (polling, notify, or manual)
+      --wait-for-deletions=true: Wait for pending deletions to complete before a deployment
+      --wait-for-deletions-delay=2s: Delay between two checks for pending deletions
+      --wait-for-deletions-max=1m0s: Max duration to wait for pending deletions
+  -w, --watch-image=[]: Choose which artifacts to watch. Artifacts with image names that contain the expression will be watched only. Default is to watch sources for all artifacts
+  -i, --watch-poll-interval=1000: Interval (in ms) between two checks for file changes
 
 Usage:
   skaffold debug [options]
@@ -355,23 +391,35 @@ Env vars:
 * `SKAFFOLD_CLEANUP` (same as `--cleanup`)
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
 * `SKAFFOLD_ENABLE_RPC` (same as `--enable-rpc`)
+* `SKAFFOLD_EVENT_LOG_FILE` (same as `--event-log-file`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_FORCE` (same as `--force`)
 * `SKAFFOLD_INSECURE_REGISTRY` (same as `--insecure-registry`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
 * `SKAFFOLD_LABEL` (same as `--label`)
+* `SKAFFOLD_MUTE_LOGS` (same as `--mute-logs`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
 * `SKAFFOLD_NO_PRUNE` (same as `--no-prune`)
 * `SKAFFOLD_NO_PRUNE_CHILDREN` (same as `--no-prune-children`)
 * `SKAFFOLD_PORT_FORWARD` (same as `--port-forward`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 * `SKAFFOLD_RPC_HTTP_PORT` (same as `--rpc-http-port`)
 * `SKAFFOLD_RPC_PORT` (same as `--rpc-port`)
 * `SKAFFOLD_SKIP_TESTS` (same as `--skip-tests`)
+* `SKAFFOLD_STATUS_CHECK` (same as `--status-check`)
+* `SKAFFOLD_TAG` (same as `--tag`)
 * `SKAFFOLD_TAIL` (same as `--tail`)
 * `SKAFFOLD_TOOT` (same as `--toot`)
+* `SKAFFOLD_TRIGGER` (same as `--trigger`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS` (same as `--wait-for-deletions`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_DELAY` (same as `--wait-for-deletions-delay`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_MAX` (same as `--wait-for-deletions-max`)
+* `SKAFFOLD_WATCH_IMAGE` (same as `--watch-image`)
+* `SKAFFOLD_WATCH_POLL_INTERVAL` (same as `--watch-poll-interval`)
 
 ### skaffold delete
 
@@ -383,11 +431,13 @@ Delete the deployed application
 Options:
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
   -n, --namespace='': Run deployments in the specified namespace
-  -p, --profile=[]: Activate profiles by name
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
 
 Usage:
   skaffold delete [options]
@@ -400,11 +450,13 @@ Env vars:
 
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 
 ### skaffold deploy
 
@@ -420,24 +472,40 @@ Examples:
   # Deploy those tags
   skaffold deploy --build-artifacts=tags.json
 
+  # Build the artifacts and then deploy them
+  skaffold build -q | skaffold deploy --build-artifacts -
+
+  # Deploy without first rendering the manifests
+  skaffold deploy --skip-render
+
 Options:
-  -a, --build-artifacts=: Filepath containing build output.
-E.g. build.out created by running skaffold build --quiet -o "{{json .}}" > build.out
+  -a, --build-artifacts=: File containing build result from a previous 'skaffold build --file-output'
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
       --enable-rpc=false: Enable gRPC for exposing Skaffold events (true by default for `skaffold dev`)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
-      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime! (true by default for `skaffold dev`)
+      --event-log-file='': Save Skaffold events to the provided file after skaffold has finished executing, requires --enable-rpc=true
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime!
   -i, --images=: A list of pre-built images to deploy
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
   -l, --label=[]: Add custom labels to deployed objects. Set multiple times for multiple labels
+      --mute-logs=[]: mute logs for specified stages in pipeline (build, deploy, status-check, none, all)
   -n, --namespace='': Run deployments in the specified namespace
-  -p, --profile=[]: Activate profiles by name
+      --port-forward=false: Port-forward exposed container ports within pods
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
       --rpc-http-port=50052: tcp port to expose event REST API over HTTP
       --rpc-port=50051: tcp port to expose event API
-      --tail=false: Stream logs from deployed objects (default false)
+      --skip-render=false: Don't render the manifests, just deploy them
+      --status-check=true: Wait for deployed resources to stabilize
+  -t, --tag='': The optional custom tag to use for images which overrides the current Tagger configuration
+      --tail=false: Stream logs from deployed objects (true by default for `skaffold dev` and `skaffold debug`)
       --toot=false: Emit a terminal beep after the deploy is complete
+      --wait-for-deletions=true: Wait for pending deletions to complete before a deployment
+      --wait-for-deletions-delay=2s: Delay between two checks for pending deletions
+      --wait-for-deletions-max=1m0s: Max duration to wait for pending deletions
 
 Usage:
   skaffold deploy [options]
@@ -451,19 +519,30 @@ Env vars:
 * `SKAFFOLD_BUILD_ARTIFACTS` (same as `--build-artifacts`)
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
 * `SKAFFOLD_ENABLE_RPC` (same as `--enable-rpc`)
+* `SKAFFOLD_EVENT_LOG_FILE` (same as `--event-log-file`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_FORCE` (same as `--force`)
 * `SKAFFOLD_IMAGES` (same as `--images`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
 * `SKAFFOLD_LABEL` (same as `--label`)
+* `SKAFFOLD_MUTE_LOGS` (same as `--mute-logs`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
+* `SKAFFOLD_PORT_FORWARD` (same as `--port-forward`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 * `SKAFFOLD_RPC_HTTP_PORT` (same as `--rpc-http-port`)
 * `SKAFFOLD_RPC_PORT` (same as `--rpc-port`)
+* `SKAFFOLD_SKIP_RENDER` (same as `--skip-render`)
+* `SKAFFOLD_STATUS_CHECK` (same as `--status-check`)
+* `SKAFFOLD_TAG` (same as `--tag`)
 * `SKAFFOLD_TAIL` (same as `--tail`)
 * `SKAFFOLD_TOOT` (same as `--toot`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS` (same as `--wait-for-deletions`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_DELAY` (same as `--wait-for-deletions-delay`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_MAX` (same as `--wait-for-deletions-max`)
 
 ### skaffold dev
 
@@ -478,25 +557,34 @@ Options:
       --cleanup=true: Delete deployments after dev or debug mode is interrupted
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
       --enable-rpc=false: Enable gRPC for exposing Skaffold events (true by default for `skaffold dev`)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
-      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime! (true by default for `skaffold dev`)
+      --event-log-file='': Save Skaffold events to the provided file after skaffold has finished executing, requires --enable-rpc=true
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime!
       --insecure-registry=[]: Target registries for built images which are not secure
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
   -l, --label=[]: Add custom labels to deployed objects. Set multiple times for multiple labels
+      --mute-logs=[]: mute logs for specified stages in pipeline (build, deploy, status-check, none, all)
   -n, --namespace='': Run deployments in the specified namespace
       --no-prune=false: Skip removing images and containers built by Skaffold
       --no-prune-children=false: Skip removing layers reused by Skaffold
       --port-forward=false: Port-forward exposed container ports within pods
-  -p, --profile=[]: Activate profiles by name
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
       --render-only=false: Print rendered Kubernetes manifests instead of deploying them
       --rpc-http-port=50052: tcp port to expose event REST API over HTTP
       --rpc-port=50051: tcp port to expose event API
       --skip-tests=false: Whether to skip the tests after building
-      --tail=true: Stream logs from deployed objects
+      --status-check=true: Wait for deployed resources to stabilize
+  -t, --tag='': The optional custom tag to use for images which overrides the current Tagger configuration
+      --tail=false: Stream logs from deployed objects (true by default for `skaffold dev` and `skaffold debug`)
       --toot=false: Emit a terminal beep after the deploy is complete
       --trigger='notify': How is change detection triggered? (polling, notify, or manual)
+      --wait-for-deletions=true: Wait for pending deletions to complete before a deployment
+      --wait-for-deletions-delay=2s: Delay between two checks for pending deletions
+      --wait-for-deletions-max=1m0s: Max duration to wait for pending deletions
   -w, --watch-image=[]: Choose which artifacts to watch. Artifacts with image names that contain the expression will be watched only. Default is to watch sources for all artifacts
   -i, --watch-poll-interval=1000: Interval (in ms) between two checks for file changes
 
@@ -514,25 +602,34 @@ Env vars:
 * `SKAFFOLD_CLEANUP` (same as `--cleanup`)
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
 * `SKAFFOLD_ENABLE_RPC` (same as `--enable-rpc`)
+* `SKAFFOLD_EVENT_LOG_FILE` (same as `--event-log-file`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_FORCE` (same as `--force`)
 * `SKAFFOLD_INSECURE_REGISTRY` (same as `--insecure-registry`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
 * `SKAFFOLD_LABEL` (same as `--label`)
+* `SKAFFOLD_MUTE_LOGS` (same as `--mute-logs`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
 * `SKAFFOLD_NO_PRUNE` (same as `--no-prune`)
 * `SKAFFOLD_NO_PRUNE_CHILDREN` (same as `--no-prune-children`)
 * `SKAFFOLD_PORT_FORWARD` (same as `--port-forward`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 * `SKAFFOLD_RENDER_ONLY` (same as `--render-only`)
 * `SKAFFOLD_RPC_HTTP_PORT` (same as `--rpc-http-port`)
 * `SKAFFOLD_RPC_PORT` (same as `--rpc-port`)
 * `SKAFFOLD_SKIP_TESTS` (same as `--skip-tests`)
+* `SKAFFOLD_STATUS_CHECK` (same as `--status-check`)
+* `SKAFFOLD_TAG` (same as `--tag`)
 * `SKAFFOLD_TAIL` (same as `--tail`)
 * `SKAFFOLD_TOOT` (same as `--toot`)
 * `SKAFFOLD_TRIGGER` (same as `--trigger`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS` (same as `--wait-for-deletions`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_DELAY` (same as `--wait-for-deletions-delay`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_MAX` (same as `--wait-for-deletions-max`)
 * `SKAFFOLD_WATCH_IMAGE` (same as `--watch-image`)
 * `SKAFFOLD_WATCH_POLL_INTERVAL` (same as `--watch-poll-interval`)
 
@@ -543,9 +640,19 @@ Run a diagnostic on Skaffold
 ```
 
 
+Examples:
+  # Search for configuration issues and print the effective configuration
+  skaffold diagnose
+
+  # Print the effective skaffold.yaml configuration for given profile
+  skaffold diagnose --yaml-only --profile PROFILE
+
 Options:
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
-  -p, --profile=[]: Activate profiles by name
+  -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
+      --yaml-only=false: Only prints the effective skaffold.yaml configuration
 
 Usage:
   skaffold diagnose [options]
@@ -556,19 +663,30 @@ Use "skaffold options" for a list of global command-line options (applies to all
 ```
 Env vars:
 
+* `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
+* `SKAFFOLD_YAML_ONLY` (same as `--yaml-only`)
 
 ### skaffold fix
 
-Update old configuration to newest schema version
+Update old configuration to a newer schema version
 
 ```
 
 
+Examples:
+  # Update "skaffold.yaml" in the current folder to the latest version
+  skaffold fix
+
+  # Update "skaffold.yaml" in the current folder to version "skaffold/v1"
+  skaffold fix --version skaffold/v1
+
 Options:
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
       --overwrite=false: Overwrite original config with fixed config
+      --version='skaffold/v2beta11': Target schema version to upgrade to
 
 Usage:
   skaffold fix [options]
@@ -581,6 +699,7 @@ Env vars:
 
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_OVERWRITE` (same as `--overwrite`)
+* `SKAFFOLD_VERSION` (same as `--version`)
 
 ### skaffold init
 
@@ -594,8 +713,11 @@ Options:
   -a, --artifact=[]: '='-delimited Dockerfile/image pair, or JSON string, to generate build artifact
 (example: --artifact='{"builder":"Docker","payload":{"path":"/web/Dockerfile.web"},"image":"gcr.io/web-project/image"}')
       --compose-file='': Initialize from a docker-compose file
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
+      --default-kustomization='': Default Kustomization overlay path (others will be added as profiles)
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
       --force=false: Force the generation of the Skaffold config
+      --generate-manifests=false: Allows skaffold to try and generate basic kubernetes resources to get your project started
+  -k, --kubernetes-manifest=[]: A path or a glob pattern to kubernetes manifests (can be non-existent) to be added to the kubectl deployer (overrides detection of kubernetes manifests). Repeat the flag for multiple entries. E.g.: skaffold init -k pod.yaml -k k8s/*.yml
       --skip-build=false: Skip generating build artifacts in Skaffold config
 
 Usage:
@@ -610,8 +732,11 @@ Env vars:
 * `SKAFFOLD_ANALYZE` (same as `--analyze`)
 * `SKAFFOLD_ARTIFACT` (same as `--artifact`)
 * `SKAFFOLD_COMPOSE_FILE` (same as `--compose-file`)
+* `SKAFFOLD_DEFAULT_KUSTOMIZATION` (same as `--default-kustomization`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_FORCE` (same as `--force`)
+* `SKAFFOLD_GENERATE_MANIFESTS` (same as `--generate-manifests`)
+* `SKAFFOLD_KUBERNETES_MANIFEST` (same as `--kubernetes-manifest`)
 * `SKAFFOLD_SKIP_BUILD` (same as `--skip-build`)
 
 ### skaffold options
@@ -622,6 +747,9 @@ Env vars:
 The following options can be passed to any command:
 
       --color=34: Specify the default output color in ANSI escape codes
+      --interactive=true: Allow user prompts for more information
+      --timestamps=false: Print timestamps in logs.
+      --update-check=true: Check for a more recent version of Skaffold
   -v, --verbosity='warning': Log level (debug, info, warn, error, fatal, panic)
 
 
@@ -634,13 +762,23 @@ The following options can be passed to any command:
 ```
 
 
+Examples:
+  # Hydrate Kubernetes manifests without building the images, using digest resolved from tag in remote registry 
+  skaffold render --digest-source=remote
+
 Options:
+      --add-skaffold-labels=true: Add Skaffold-specific labels to rendered manifest. If false, custom labels are still applied. Helpful for GitOps model where Skaffold is not the deployer.
+  -a, --build-artifacts=: File containing build result from a previous 'skaffold build --file-output'
   -d, --default-repo='': Default repository value (overrides global config)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
+      --digest-source='local': Set to 'local' to build images locally and use digests from built images; Set to 'remote' to resolve the digest of images by tag from the remote registry; Set to 'none' to use tags directly from the Kubernetes manifests
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+  -l, --label=[]: Add custom labels to deployed objects. Set multiple times for multiple labels
       --loud=false: Show the build logs and output
   -n, --namespace='': Run deployments in the specified namespace
+      --offline=false: Do not connect to Kubernetes API server for manifest creation and validation. This is helpful when no Kubernetes cluster is available (e.g. GitOps model). No metadata.namespace attribute is injected in this case - the manifest content does not get changed.
       --output='': file to write rendered manifests to
-  -p, --profile=[]: Activate profiles by name
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
 
 Usage:
   skaffold render [options]
@@ -651,12 +789,18 @@ Use "skaffold options" for a list of global command-line options (applies to all
 ```
 Env vars:
 
+* `SKAFFOLD_ADD_SKAFFOLD_LABELS` (same as `--add-skaffold-labels`)
+* `SKAFFOLD_BUILD_ARTIFACTS` (same as `--build-artifacts`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DIGEST_SOURCE` (same as `--digest-source`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
+* `SKAFFOLD_LABEL` (same as `--label`)
 * `SKAFFOLD_LOUD` (same as `--loud`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
+* `SKAFFOLD_OFFLINE` (same as `--offline`)
 * `SKAFFOLD_OUTPUT` (same as `--output`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 
 ### skaffold run
 
@@ -673,29 +817,40 @@ Examples:
   skaffold run -p <profile>
 
 Options:
+  -b, --build-image=[]: Only build artifacts with image names that contain the given substring. Default is to build sources for all artifacts
       --cache-artifacts=true: Set to false to disable default caching of artifacts
       --cache-file='': Specify the location of the cache file (default $HOME/.skaffold/cache)
       --cleanup=true: Delete deployments after dev or debug mode is interrupted
   -c, --config='': File for global configurations (defaults to $HOME/.skaffold/config)
   -d, --default-repo='': Default repository value (overrides global config)
+      --detect-minikube=true: Use heuristics to detect a minikube cluster
       --enable-rpc=false: Enable gRPC for exposing Skaffold events (true by default for `skaffold dev`)
-  -f, --filename='skaffold.yaml': Filename or URL to the pipeline file
-      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime! (true by default for `skaffold dev`)
+      --event-log-file='': Save Skaffold events to the provided file after skaffold has finished executing, requires --enable-rpc=true
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+      --force=false: Recreate Kubernetes resources if necessary for deployment, warning: might cause downtime!
       --insecure-registry=[]: Target registries for built images which are not secure
       --kube-context='': Deploy to this Kubernetes context
       --kubeconfig='': Path to the kubeconfig file to use for CLI requests.
   -l, --label=[]: Add custom labels to deployed objects. Set multiple times for multiple labels
+      --mute-logs=[]: mute logs for specified stages in pipeline (build, deploy, status-check, none, all)
   -n, --namespace='': Run deployments in the specified namespace
       --no-prune=false: Skip removing images and containers built by Skaffold
       --no-prune-children=false: Skip removing layers reused by Skaffold
-  -p, --profile=[]: Activate profiles by name
+      --port-forward=false: Port-forward exposed container ports within pods
+  -p, --profile=[]: Activate profiles by name (prefixed with `-` to disable a profile)
+      --profile-auto-activation=true: Set to false to disable profile auto activation
       --render-only=false: Print rendered Kubernetes manifests instead of deploying them
+      --render-output='': Writes '--render-only' output to the specified file
       --rpc-http-port=50052: tcp port to expose event REST API over HTTP
       --rpc-port=50051: tcp port to expose event API
       --skip-tests=false: Whether to skip the tests after building
+      --status-check=true: Wait for deployed resources to stabilize
   -t, --tag='': The optional custom tag to use for images which overrides the current Tagger configuration
-      --tail=false: Stream logs from deployed objects (default false)
+      --tail=false: Stream logs from deployed objects (true by default for `skaffold dev` and `skaffold debug`)
       --toot=false: Emit a terminal beep after the deploy is complete
+      --wait-for-deletions=true: Wait for pending deletions to complete before a deployment
+      --wait-for-deletions-delay=2s: Delay between two checks for pending deletions
+      --wait-for-deletions-max=1m0s: Max duration to wait for pending deletions
 
 Usage:
   skaffold run [options]
@@ -706,29 +861,148 @@ Use "skaffold options" for a list of global command-line options (applies to all
 ```
 Env vars:
 
+* `SKAFFOLD_BUILD_IMAGE` (same as `--build-image`)
 * `SKAFFOLD_CACHE_ARTIFACTS` (same as `--cache-artifacts`)
 * `SKAFFOLD_CACHE_FILE` (same as `--cache-file`)
 * `SKAFFOLD_CLEANUP` (same as `--cleanup`)
 * `SKAFFOLD_CONFIG` (same as `--config`)
 * `SKAFFOLD_DEFAULT_REPO` (same as `--default-repo`)
+* `SKAFFOLD_DETECT_MINIKUBE` (same as `--detect-minikube`)
 * `SKAFFOLD_ENABLE_RPC` (same as `--enable-rpc`)
+* `SKAFFOLD_EVENT_LOG_FILE` (same as `--event-log-file`)
 * `SKAFFOLD_FILENAME` (same as `--filename`)
 * `SKAFFOLD_FORCE` (same as `--force`)
 * `SKAFFOLD_INSECURE_REGISTRY` (same as `--insecure-registry`)
 * `SKAFFOLD_KUBE_CONTEXT` (same as `--kube-context`)
 * `SKAFFOLD_KUBECONFIG` (same as `--kubeconfig`)
 * `SKAFFOLD_LABEL` (same as `--label`)
+* `SKAFFOLD_MUTE_LOGS` (same as `--mute-logs`)
 * `SKAFFOLD_NAMESPACE` (same as `--namespace`)
 * `SKAFFOLD_NO_PRUNE` (same as `--no-prune`)
 * `SKAFFOLD_NO_PRUNE_CHILDREN` (same as `--no-prune-children`)
+* `SKAFFOLD_PORT_FORWARD` (same as `--port-forward`)
 * `SKAFFOLD_PROFILE` (same as `--profile`)
+* `SKAFFOLD_PROFILE_AUTO_ACTIVATION` (same as `--profile-auto-activation`)
 * `SKAFFOLD_RENDER_ONLY` (same as `--render-only`)
+* `SKAFFOLD_RENDER_OUTPUT` (same as `--render-output`)
 * `SKAFFOLD_RPC_HTTP_PORT` (same as `--rpc-http-port`)
 * `SKAFFOLD_RPC_PORT` (same as `--rpc-port`)
 * `SKAFFOLD_SKIP_TESTS` (same as `--skip-tests`)
+* `SKAFFOLD_STATUS_CHECK` (same as `--status-check`)
 * `SKAFFOLD_TAG` (same as `--tag`)
 * `SKAFFOLD_TAIL` (same as `--tail`)
 * `SKAFFOLD_TOOT` (same as `--toot`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS` (same as `--wait-for-deletions`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_DELAY` (same as `--wait-for-deletions-delay`)
+* `SKAFFOLD_WAIT_FOR_DELETIONS_MAX` (same as `--wait-for-deletions-max`)
+
+### skaffold schema
+
+List and print json schemas used to validate skaffold.yaml configuration
+
+```
+
+
+Available Commands:
+  get         Print a given skaffold.yaml's json schema
+  list        List skaffold.yaml's json schema versions
+
+Use "skaffold <command> --help" for more information about a given command.
+
+
+```
+
+### skaffold schema get
+
+Print a given skaffold.yaml's json schema
+
+```
+
+
+Examples:
+  # Print the schema in version `skaffold/v1`
+  skaffold schema get skaffold/v1
+
+Usage:
+  skaffold schema get [options]
+
+Use "skaffold options" for a list of global command-line options (applies to all commands).
+
+
+```
+
+### skaffold schema list
+
+List skaffold.yaml's json schema versions
+
+```
+
+
+Examples:
+  # List all the versions
+  skaffold schema list
+
+  # List all the versions, in json format
+  skaffold schema list -o json
+
+Options:
+  -o, --output='plain': Type of output: `plain` or `json`.
+
+Usage:
+  skaffold schema list [options]
+
+Use "skaffold options" for a list of global command-line options (applies to all commands).
+
+
+```
+Env vars:
+
+* `SKAFFOLD_OUTPUT` (same as `--output`)
+
+### skaffold survey
+
+Opens a web browser to fill out the Skaffold survey
+
+```
+
+
+Usage:
+  skaffold survey [options]
+
+Use "skaffold options" for a list of global command-line options (applies to all commands).
+
+
+```
+
+### skaffold test
+
+Run tests against your built application images
+
+```
+
+
+Examples:
+  # Build the artifacts and collect the tags into a file
+  skaffold build --file-output=tags.json
+
+  # Run test against images previously built by Skaffold into a 'tags.json' file
+  skaffold test --build-artifacts=tags.json
+
+Options:
+  -a, --build-artifacts=: File containing build result from a previous 'skaffold build --file-output'
+  -f, --filename='skaffold.yaml': Path or URL to the Skaffold config file
+
+Usage:
+  skaffold test [options]
+
+Use "skaffold options" for a list of global command-line options (applies to all commands).
+
+
+```
+Env vars:
+
+* `SKAFFOLD_BUILD_ARTIFACTS` (same as `--build-artifacts`)
+* `SKAFFOLD_FILENAME` (same as `--filename`)
 
 ### skaffold version
 

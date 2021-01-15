@@ -31,11 +31,11 @@ func NewCmdDelete() *cobra.Command {
 	return NewCmd("delete").
 		WithDescription("Delete the deployed application").
 		WithCommonFlags().
-		NoArgs(cancelWithCtrlC(context.Background(), doDelete))
+		NoArgs(doDelete)
 }
 
 func doDelete(ctx context.Context, out io.Writer) error {
-	return withRunner(ctx, func(r runner.Runner, _ *latest.SkaffoldConfig) error {
+	return withRunner(ctx, func(r runner.Runner, _ []*latest.SkaffoldConfig) error {
 		return r.Cleanup(ctx, out)
 	})
 }

@@ -19,16 +19,19 @@ package runner
 import (
 	"io"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/portforward"
 )
 
-func (r *SkaffoldRunner) createForwarder(out io.Writer, kubectlCLI *kubectl.CLI) {
-	r.forwarderManager = portforward.NewForwarderManager(out,
-		kubectlCLI,
+func (r *SkaffoldRunner) createForwarder(out io.Writer) *portforward.ForwarderManager {
+	if !r.runCtx.PortForward() {
+		return nil
+	}
+
+	return portforward.NewForwarderManager(out,
+		r.kubectlCLI,
 		r.podSelector,
-		r.runCtx.Namespaces,
-		r.defaultLabeller.RunIDKeyValueString(),
+		r.runCtx.GetNamespaces(),
+		r.labeller.RunIDSelector(),
 		r.runCtx.Opts.PortForward,
-		r.portForwardResources)
+		r.runCtx.PortForwardResources())
 }

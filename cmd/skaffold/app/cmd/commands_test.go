@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -70,7 +71,7 @@ func TestNewCmdExactArgs(t *testing.T) {
 }
 
 func TestNewCmdError(t *testing.T) {
-	cmd := NewCmd("").NoArgs(func(out io.Writer) error {
+	cmd := NewCmd("").NoArgs(func(ctx context.Context, out io.Writer) error {
 		return errors.New("expected error")
 	})
 
@@ -82,7 +83,7 @@ func TestNewCmdError(t *testing.T) {
 func TestNewCmdOutput(t *testing.T) {
 	var buf bytes.Buffer
 
-	cmd := NewCmd("").ExactArgs(1, func(out io.Writer, args []string) error {
+	cmd := NewCmd("").ExactArgs(1, func(ctx context.Context, out io.Writer, args []string) error {
 		fmt.Fprintf(out, "test output: %v\n", args)
 		return nil
 	})
@@ -94,7 +95,7 @@ func TestNewCmdOutput(t *testing.T) {
 }
 
 func TestNewCmdWithFlags(t *testing.T) {
-	cmd := NewCmd("").WithFlags(func(flagSet *pflag.FlagSet) {
+	cmd := NewCmd("").WithFlagAdder(func(flagSet *pflag.FlagSet) {
 		flagSet.Bool("test", false, "usage")
 	}).NoArgs(nil)
 
@@ -102,6 +103,11 @@ func TestNewCmdWithFlags(t *testing.T) {
 
 	testutil.CheckDeepEqual(t, 1, len(flags))
 	testutil.CheckDeepEqual(t, "usage", flags["test"].Usage)
+}
+
+func TestNewCmdWithHouseKeepingMessages(t *testing.T) {
+	cmd := NewCmd("run").WithHouseKeepingMessages().NoArgs(nil)
+	testutil.CheckDeepEqual(t, map[string]string{HouseKeepingMessagesAllowedAnnotation: "true"}, cmd.Annotations)
 }
 
 func TestNewCmdWithCommonFlags(t *testing.T) {

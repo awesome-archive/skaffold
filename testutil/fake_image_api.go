@@ -19,23 +19,22 @@ package testutil
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/docker/docker/api/types"
-	containertypes "github.com/docker/docker/api/types/container"
-	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	reg "github.com/docker/docker/registry"
 	digest "github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/pkg/errors"
 )
 
 type ContainerState int
@@ -43,38 +42,71 @@ type ContainerState int
 const (
 	Created ContainerState = 0
 	Started ContainerState = 1
+
+	TestUtilization uint64 = 424242
 )
 
 type FakeAPIClient struct {
 	client.CommonAPIClient
 
-	tagToImageID    map[string]string
 	ErrImageBuild   bool
 	ErrImageInspect bool
 	ErrImagePush    bool
 	ErrImagePull    bool
-	ErrStream       bool
+	ErrImageList    bool
+	ErrImageRemove  bool
 
-	nextImageID int
-	Pushed      map[string]string
-	Built       []types.ImageBuildOptions
+	ErrStream  bool
+	ErrVersion bool
+	// will return the "test error" error on first <DUFails> DiskUsage calls
+	DUFails int
 
-	nextContainerID int
-	containerStates map[string]ContainerState
-	containerLock   sync.Mutex
+	nextImageID  int32
+	tagToImageID sync.Map // map[string]string
+	pushed       sync.Map // map[string]string
+	pulled       sync.Map // map[string]string
+
+	mux   sync.Mutex
+	Built []types.ImageBuildOptions
+	// ref -> [id]
+	LocalImages map[string][]string
+}
+
+func (f *FakeAPIClient) ServerVersion(ctx context.Context) (types.Version, error) {
+	if f.ErrVersion {
+		return types.Version{}, errors.New("docker not found")
+	}
+	return types.Version{}, nil
 }
 
 func (f *FakeAPIClient) Add(tag, imageID string) *FakeAPIClient {
-	if f.tagToImageID == nil {
-		f.tagToImageID = make(map[string]string)
-	}
-
-	f.tagToImageID[imageID] = imageID
-	f.tagToImageID[tag] = imageID
+	f.tagToImageID.Store(imageID, imageID)
+	f.tagToImageID.Store(tag, imageID)
 	if !strings.Contains(tag, ":") {
-		f.tagToImageID[tag+":latest"] = imageID
+		f.tagToImageID.Store(tag+":latest", imageID)
 	}
 	return f
+}
+
+func (f *FakeAPIClient) Pulled() []string {
+	var p []string
+	f.pulled.Range(func(ref, _ interface{}) bool {
+		p = append(p, ref.(string))
+		return true
+	})
+	return p
+}
+
+func (f *FakeAPIClient) Pushed() map[string]string {
+	p := make(map[string]string)
+	f.pushed.Range(func(ref, id interface{}) bool {
+		p[ref.(string)] = id.(string)
+		return true
+	})
+	if len(p) == 0 {
+		return nil
+	}
+	return p
 }
 
 type notFoundError struct {
@@ -102,49 +134,76 @@ func (f *FakeAPIClient) ImageBuild(_ context.Context, _ io.Reader, options types
 		return types.ImageBuildResponse{}, fmt.Errorf("")
 	}
 
-	f.nextImageID++
-	imageID := fmt.Sprintf("sha256:%d", f.nextImageID)
+	next := atomic.AddInt32(&f.nextImageID, 1)
+	imageID := fmt.Sprintf("sha256:%d", next)
 
 	for _, tag := range options.Tags {
 		f.Add(tag, imageID)
 	}
 
+	f.mux.Lock()
 	f.Built = append(f.Built, options)
+	f.mux.Unlock()
 
 	return types.ImageBuildResponse{
 		Body: f.body(imageID),
 	}, nil
 }
 
-func (f *FakeAPIClient) ImageInspectWithRaw(_ context.Context, ref string) (types.ImageInspect, []byte, error) {
+func (f *FakeAPIClient) ImageRemove(_ context.Context, _ string, _ types.ImageRemoveOptions) ([]types.ImageDeleteResponseItem, error) {
+	if f.ErrImageRemove {
+		return []types.ImageDeleteResponseItem{}, fmt.Errorf("test error")
+	}
+	return []types.ImageDeleteResponseItem{}, nil
+}
+
+func (f *FakeAPIClient) ImageInspectWithRaw(_ context.Context, refOrID string) (types.ImageInspect, []byte, error) {
 	if f.ErrImageInspect {
 		return types.ImageInspect{}, nil, fmt.Errorf("")
 	}
 
-	for tag, imageID := range f.tagToImageID {
-		if tag == ref || imageID == ref {
-			rawConfig := []byte(fmt.Sprintf(`{"Config":{"Image":"%s"}}`, imageID))
-
-			var repoDigests []string
-			if digest, found := f.Pushed[ref]; found {
-				repoDigests = append(repoDigests, ref+"@"+digest)
-			}
-
-			return types.ImageInspect{
-				ID:          imageID,
-				RepoDigests: repoDigests,
-			}, rawConfig, nil
-		}
+	ref, imageID, err := f.findImageID(refOrID)
+	if err != nil {
+		return types.ImageInspect{}, nil, err
 	}
 
-	return types.ImageInspect{}, nil, &notFoundError{}
+	rawConfig := []byte(fmt.Sprintf(`{"Config":{"Image":"%s"}}`, imageID))
+
+	var repoDigests []string
+	if digest, found := f.pushed.Load(ref); found {
+		repoDigests = append(repoDigests, ref+"@"+digest.(string))
+	}
+
+	return types.ImageInspect{
+		ID:          imageID,
+		RepoDigests: repoDigests,
+	}, rawConfig, nil
+}
+
+func (f *FakeAPIClient) findImageID(refOrID string) (string, string, error) {
+	if id, found := f.tagToImageID.Load(refOrID); found {
+		return refOrID, id.(string), nil
+	}
+	var ref, id string
+	f.tagToImageID.Range(func(r, i interface{}) bool {
+		if r == refOrID || i == refOrID {
+			ref = r.(string)
+			id = i.(string)
+			return false
+		}
+		return true
+	})
+	if ref == "" {
+		return "", "", &notFoundError{}
+	}
+	return ref, id, nil
 }
 
 func (f *FakeAPIClient) DistributionInspect(ctx context.Context, ref, encodedRegistryAuth string) (registry.DistributionInspect, error) {
-	if sha, found := f.Pushed[ref]; found {
+	if sha, found := f.pushed.Load(ref); found {
 		return registry.DistributionInspect{
 			Descriptor: v1.Descriptor{
-				Digest: digest.Digest(sha),
+				Digest: digest.Digest(sha.(string)),
 			},
 		}, nil
 	}
@@ -153,12 +212,12 @@ func (f *FakeAPIClient) DistributionInspect(ctx context.Context, ref, encodedReg
 }
 
 func (f *FakeAPIClient) ImageTag(_ context.Context, image, ref string) error {
-	imageID, ok := f.tagToImageID[image]
+	imageID, ok := f.tagToImageID.Load(image)
 	if !ok {
 		return fmt.Errorf("image %s not found", image)
 	}
 
-	f.Add(ref, imageID)
+	f.Add(ref, imageID.(string))
 	return nil
 }
 
@@ -167,21 +226,24 @@ func (f *FakeAPIClient) ImagePush(_ context.Context, ref string, _ types.ImagePu
 		return nil, fmt.Errorf("")
 	}
 
+	// use the digest if previously pushed
+	imageID, found := f.tagToImageID.Load(ref)
+	if !found {
+		imageID = ""
+	}
 	sha256Digester := sha256.New()
-	if _, err := sha256Digester.Write([]byte(f.tagToImageID[ref])); err != nil {
+	if _, err := sha256Digester.Write([]byte(imageID.(string))); err != nil {
 		return nil, err
 	}
 
 	digest := "sha256:" + fmt.Sprintf("%x", sha256Digester.Sum(nil))[0:64]
-	if f.Pushed == nil {
-		f.Pushed = make(map[string]string)
-	}
-	f.Pushed[ref] = digest
 
+	f.pushed.Store(ref, digest)
 	return f.body(digest), nil
 }
 
-func (f *FakeAPIClient) ImagePull(context.Context, string, types.ImagePullOptions) (io.ReadCloser, error) {
+func (f *FakeAPIClient) ImagePull(_ context.Context, ref string, _ types.ImagePullOptions) (io.ReadCloser, error) {
+	f.pulled.Store(ref, ref)
 	if f.ErrImagePull {
 		return nil, fmt.Errorf("")
 	}
@@ -201,8 +263,8 @@ func (f *FakeAPIClient) ImageLoad(ctx context.Context, input io.Reader, quiet bo
 		return types.ImageLoadResponse{}, fmt.Errorf("reading tar")
 	}
 
-	f.nextImageID++
-	imageID := fmt.Sprintf("sha256:%d", f.nextImageID)
+	next := atomic.AddInt32(&f.nextImageID, 1)
+	imageID := fmt.Sprintf("sha256:%d", next)
 	f.Add(ref, imageID)
 
 	return types.ImageLoadResponse{
@@ -210,91 +272,38 @@ func (f *FakeAPIClient) ImageLoad(ctx context.Context, input io.Reader, quiet bo
 	}, nil
 }
 
-func (f *FakeAPIClient) ContainerCreate(ctx context.Context, config *containertypes.Config, hostConfig *containertypes.HostConfig, networkingConfig *networktypes.NetworkingConfig, containerName string) (containertypes.ContainerCreateCreatedBody, error) {
-	f.containerLock.Lock()
-	defer f.containerLock.Unlock()
-
-	f.nextContainerID++
-	containerID := strconv.Itoa(f.nextContainerID)
-
-	if f.containerStates == nil {
-		f.containerStates = make(map[string]ContainerState)
+func (f *FakeAPIClient) ImageList(ctx context.Context, ops types.ImageListOptions) ([]types.ImageSummary, error) {
+	if f.ErrImageList {
+		return []types.ImageSummary{}, fmt.Errorf("test error")
 	}
-	f.containerStates[containerID] = Created
+	var rt []types.ImageSummary
+	ref := ops.Filters.Get("reference")[0]
 
-	return containertypes.ContainerCreateCreatedBody{
-		ID: containerID,
+	for i, tag := range f.LocalImages[ref] {
+		rt = append(rt, types.ImageSummary{
+			ID:      tag,
+			Created: int64(i),
+		})
+	}
+	return rt, nil
+}
+
+func (f *FakeAPIClient) DiskUsage(ctx context.Context) (types.DiskUsage, error) {
+	// if DUFails is positive faile first DUFails errors and then return ok
+	// if negative, return ok first DUFails times and then fail the rest
+	if f.DUFails > 0 {
+		f.DUFails--
+		return types.DiskUsage{}, fmt.Errorf("test error")
+	}
+	if f.DUFails < 0 {
+		if f.DUFails == -1 {
+			f.DUFails = math.MaxInt32 - 1
+		}
+		f.DUFails++
+	}
+	return types.DiskUsage{
+		LayersSize: int64(TestUtilization),
 	}, nil
-}
-
-func (f *FakeAPIClient) ContainerStart(ctx context.Context, container string, options types.ContainerStartOptions) error {
-	f.containerLock.Lock()
-	defer f.containerLock.Unlock()
-
-	state, present := f.containerStates[container]
-	if !present {
-		return errors.New("not found")
-	}
-
-	if state == Started {
-		return errors.New("already started")
-	}
-
-	f.containerStates[container] = Started
-	return nil
-}
-
-func (f *FakeAPIClient) CopyToContainer(ctx context.Context, container, path string, content io.Reader, options types.CopyToContainerOptions) error {
-	f.containerLock.Lock()
-	defer f.containerLock.Unlock()
-
-	state, present := f.containerStates[container]
-	if !present {
-		return errors.New("not found")
-	}
-
-	if state != Started {
-		return errors.New("not started")
-	}
-
-	return nil
-}
-
-func (f *FakeAPIClient) ContainerLogs(ctx context.Context, container string, config types.ContainerLogsOptions) (io.ReadCloser, error) {
-	f.containerLock.Lock()
-	defer f.containerLock.Unlock()
-
-	state, present := f.containerStates[container]
-	if !present {
-		return nil, errors.New("not found")
-	}
-
-	if state != Started {
-		return nil, errors.New("not started")
-	}
-
-	return ioutil.NopCloser(strings.NewReader("")), nil
-}
-
-func (f *FakeAPIClient) ContainerRemove(ctx context.Context, container string, options types.ContainerRemoveOptions) error {
-	f.containerLock.Lock()
-	defer f.containerLock.Unlock()
-
-	state, present := f.containerStates[container]
-	if !present {
-		return errors.New("not found")
-	}
-
-	if state != Started {
-		return errors.New("not started")
-	}
-
-	delete(f.containerStates, container)
-	return nil
-}
-
-func (f *FakeAPIClient) VolumeRemove(ctx context.Context, volumeID string, force bool) error {
-	return nil
 }
 
 func (f *FakeAPIClient) Close() error { return nil }

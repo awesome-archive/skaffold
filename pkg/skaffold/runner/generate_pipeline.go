@@ -18,47 +18,48 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
+	pipeline "github.com/GoogleContainerTools/skaffold/pkg/skaffold/generate_pipeline"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/defaults"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-
-	"github.com/pkg/errors"
-
-	pipeline "github.com/GoogleContainerTools/skaffold/pkg/skaffold/generate_pipeline"
 )
 
-func (r *SkaffoldRunner) GeneratePipeline(ctx context.Context, out io.Writer, config *latest.SkaffoldConfig, configPaths []string, fileOut string) error {
+func (r *SkaffoldRunner) GeneratePipeline(ctx context.Context, out io.Writer, configs []*latest.SkaffoldConfig, configPaths []string, fileOut string) error {
 	// Keep track of files, configs, and profiles. This will be used to know which files to write
 	// profiles to and what flags to add to task commands
-	baseConfig := []*pipeline.ConfigFile{
-		{
-			Path:    r.runCtx.Opts.ConfigurationFile,
+	var baseConfig []*pipeline.ConfigFile
+	for _, config := range configs {
+		cfgFile := &pipeline.ConfigFile{
+			Path:    r.runCtx.ConfigurationFile(),
 			Config:  config,
 			Profile: nil,
-		},
+		}
+		baseConfig = append(baseConfig, cfgFile)
 	}
+
 	configFiles, err := setupConfigFiles(configPaths)
 	if err != nil {
-		return errors.Wrap(err, "setting up ConfigFiles")
+		return fmt.Errorf("setting up ConfigFiles: %w", err)
 	}
 	configFiles = append(baseConfig, configFiles...)
 
 	// Will run the profile setup multiple times and require user input for each specified config
 	color.Default.Fprintln(out, "Running profile setup...")
 	for _, configFile := range configFiles {
-		if err := pipeline.CreateSkaffoldProfile(out, r.runCtx, configFile); err != nil {
-			return errors.Wrap(err, "setting up profile")
+		if err := pipeline.CreateSkaffoldProfile(out, r.runCtx.GetKubeNamespace(), configFile); err != nil {
+			return fmt.Errorf("setting up profile: %w", err)
 		}
 	}
 
 	color.Default.Fprintln(out, "Generating Pipeline...")
-	pipelineYaml, err := pipeline.Yaml(out, r.runCtx, configFiles)
+	pipelineYaml, err := pipeline.Yaml(out, r.runCtx.GetKubeNamespace(), configFiles)
 	if err != nil {
-		return errors.Wrap(err, "generating pipeline yaml contents")
+		return fmt.Errorf("generating pipeline yaml contents: %w", err)
 	}
 
 	// write all yaml pieces to output
@@ -73,21 +74,23 @@ func setupConfigFiles(configPaths []string) ([]*pipeline.ConfigFile, error) {
 	// Read all given config files to read contents into SkaffoldConfig
 	var configFiles []*pipeline.ConfigFile
 	for _, path := range configPaths {
-		parsed, err := schema.ParseConfig(path, true)
+		parsedCfgs, err := schema.ParseConfigAndUpgrade(path, latest.Version)
 		if err != nil {
-			return nil, errors.Wrapf(err, "parsing config %s", path)
+			return nil, fmt.Errorf("parsing config %q: %w", path, err)
 		}
-		config := parsed.(*latest.SkaffoldConfig)
+		for _, parsedCfg := range parsedCfgs {
+			config := parsedCfg.(*latest.SkaffoldConfig)
 
-		if err := defaults.Set(config); err != nil {
-			return nil, errors.Wrap(err, "setting default values for extra configs")
-		}
+			if err := defaults.Set(config, true); err != nil {
+				return nil, fmt.Errorf("setting default values for extra configs: %w", err)
+			}
 
-		configFile := &pipeline.ConfigFile{
-			Path:   path,
-			Config: config,
+			configFile := &pipeline.ConfigFile{
+				Path:   path,
+				Config: config,
+			}
+			configFiles = append(configFiles, configFile)
 		}
-		configFiles = append(configFiles, configFile)
 	}
 
 	return configFiles, nil

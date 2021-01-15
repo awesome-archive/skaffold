@@ -27,8 +27,7 @@ import (
 )
 
 func TestGetDependenciesDockerfile(t *testing.T) {
-	tmpDir, cleanup := testutil.NewTempDir(t)
-	defer cleanup()
+	tmpDir := testutil.NewTempDir(t)
 
 	// Directory structure:
 	//   foo
@@ -51,7 +50,7 @@ func TestGetDependenciesDockerfile(t *testing.T) {
 	}
 
 	expected := []string{"Dockerfile", filepath.FromSlash("baz/file"), "foo"}
-	deps, err := GetDependencies(context.Background(), tmpDir.Root(), customArtifact, nil)
+	deps, err := GetDependencies(context.Background(), tmpDir.Root(), "test", customArtifact, nil)
 
 	testutil.CheckErrorAndDeepEqual(t, false, err, expected, deps)
 }
@@ -70,7 +69,7 @@ func TestGetDependenciesCommand(t *testing.T) {
 		}
 
 		expected := []string{"file1", "file2", "file3"}
-		deps, err := GetDependencies(context.Background(), "", customArtifact, nil)
+		deps, err := GetDependencies(context.Background(), "", "test", customArtifact, nil)
 
 		t.CheckNoError(err)
 		t.CheckDeepEqual(expected, deps)
@@ -89,14 +88,22 @@ func TestGetDependenciesPaths(t *testing.T) {
 			description: "watch everything",
 			paths:       []string{"."},
 			expected:    []string{"bar", filepath.FromSlash("baz/file"), "foo"},
-		}, {
+		},
+		{
 			description: "watch nothing",
-		}, {
+		},
+		{
 			description: "ignore some paths",
 			paths:       []string{"."},
 			ignore:      []string{"b*"},
 			expected:    []string{"foo"},
-		}, {
+		},
+		{
+			description: "glob",
+			paths:       []string{"**"},
+			expected:    []string{"bar", filepath.FromSlash("baz/file"), "foo"},
+		},
+		{
 			description: "error",
 			paths:       []string{"unknown"},
 			shouldErr:   true,
@@ -112,7 +119,7 @@ func TestGetDependenciesPaths(t *testing.T) {
 			tmpDir := t.NewTempDir().
 				Touch("foo", "bar", "baz/file")
 
-			deps, err := GetDependencies(context.Background(), tmpDir.Root(), &latest.CustomArtifact{
+			deps, err := GetDependencies(context.Background(), tmpDir.Root(), "test", &latest.CustomArtifact{
 				Dependencies: &latest.CustomDependencies{
 					Paths:  test.paths,
 					Ignore: test.ignore,

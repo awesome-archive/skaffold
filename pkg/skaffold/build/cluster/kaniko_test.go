@@ -19,133 +19,80 @@ package cluster
 import (
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
+
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
-func TestArgs(t *testing.T) {
-	tests := []struct {
-		description        string
-		artifact           *latest.KanikoArtifact
-		insecureRegistries map[string]bool
-		tag                string
-		shouldErr          bool
-		expectedArgs       []string
-	}{
-		{
-			description: "simple build",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-			},
-			expectedArgs: []string{},
-		},
-		{
-			description: "cache layers",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				Cache:          &latest.KanikoCache{},
-			},
-			expectedArgs: []string{"--cache=true"},
-		},
-		{
-			description: "cache layers to specific repo",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				Cache: &latest.KanikoCache{
-					Repo: "repo",
-				},
-			},
-			expectedArgs: []string{"--cache=true", "--cache-repo", "repo"},
-		},
-		{
-			description: "cache path",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				Cache: &latest.KanikoCache{
-					HostPath: "/cache",
-				},
-			},
-			expectedArgs: []string{"--cache=true", "--cache-dir", "/cache"},
-		},
-		{
-			description: "target",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				Target:         "target",
-			},
-			expectedArgs: []string{"--target", "target"},
-		},
-		{
-			description: "reproducible",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				Reproducible:   true,
-			},
-			expectedArgs: []string{"--reproducible"},
-		},
-		{
-			description: "build args",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				BuildArgs: map[string]*string{
-					"nil_key":   nil,
-					"empty_key": util.StringPtr(""),
-					"value_key": util.StringPtr("value"),
-				},
-			},
-			expectedArgs: []string{"--build-arg", "empty_key=", "--build-arg", "nil_key", "--build-arg", "value_key=value"},
-		},
-		{
-			description: "invalid build args",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				BuildArgs: map[string]*string{
-					"invalid": util.StringPtr("{{Invalid"),
-				},
-			},
-			shouldErr: true,
-		},
-		{
-			description: "insecure registries",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-			},
-			insecureRegistries: map[string]bool{"localhost:4000": true},
-			expectedArgs:       []string{"--insecure-registry", "localhost:4000"},
-		},
-		{
-			description: "skip tls",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				SkipTLS:        true,
-			},
-			expectedArgs: []string{"--skip-tls-verify-registry", "gcr.io"},
-		},
-		{
-			description: "invalid registry",
-			artifact: &latest.KanikoArtifact{
-				DockerfilePath: "Dockerfile",
-				SkipTLS:        true,
-			},
-			tag:       "!!!!",
-			shouldErr: true,
-		},
+func TestEnvInterpolation(t *testing.T) {
+	imageStr := "why.com/is/this/such/a/long/repo/name/testimage:testtag"
+	artifact := &latest.KanikoArtifact{
+		Env: []v1.EnvVar{{Name: "hui", Value: "buh"}},
 	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			commonArgs := []string{"--dockerfile", "Dockerfile", "--context", "context", "--destination", "gcr.io/tag", "-v", "info"}
-
-			tag := "gcr.io/tag"
-			if test.tag != "" {
-				tag = test.tag
-			}
-			args, err := args(test.artifact, "context", tag, test.insecureRegistries)
-
-			t.CheckError(test.shouldErr, err)
-			if !test.shouldErr {
-				t.CheckDeepEqual(append(commonArgs, test.expectedArgs...), args)
-			}
-		})
+	generatedEnvs, err := generateEnvFromImage(imageStr)
+	if err != nil {
+		t.Fatalf("error generating env: %s", err)
 	}
+	env, err := evaluateEnv(artifact.Env, generatedEnvs...)
+	if err != nil {
+		t.Fatalf("unable to evaluate env variables: %s", err)
+	}
+
+	actual := env
+	expected := []v1.EnvVar{
+		{Name: "hui", Value: "buh"},
+		{Name: "IMAGE_REPO", Value: "why.com/is/this/such/a/long/repo/name"},
+		{Name: "IMAGE_NAME", Value: "testimage"},
+		{Name: "IMAGE_TAG", Value: "testtag"},
+	}
+	testutil.CheckElementsMatch(t, expected, actual)
+}
+
+func TestEnvInterpolation_IPPort(t *testing.T) {
+	imageStr := "10.10.10.10:1000/is/this/such/a/long/repo/name/testimage:testtag"
+	artifact := &latest.KanikoArtifact{
+		Env: []v1.EnvVar{{Name: "hui", Value: "buh"}},
+	}
+	generatedEnvs, err := generateEnvFromImage(imageStr)
+	if err != nil {
+		t.Fatalf("error generating env: %s", err)
+	}
+	env, err := evaluateEnv(artifact.Env, generatedEnvs...)
+	if err != nil {
+		t.Fatalf("unable to evaluate env variables: %s", err)
+	}
+
+	actual := env
+	expected := []v1.EnvVar{
+		{Name: "hui", Value: "buh"},
+		{Name: "IMAGE_REPO", Value: "10.10.10.10:1000/is/this/such/a/long/repo/name"},
+		{Name: "IMAGE_NAME", Value: "testimage"},
+		{Name: "IMAGE_TAG", Value: "testtag"},
+	}
+	testutil.CheckElementsMatch(t, expected, actual)
+}
+
+func TestEnvInterpolation_Latest(t *testing.T) {
+	imageStr := "why.com/is/this/such/a/long/repo/name/testimage"
+	artifact := &latest.KanikoArtifact{
+		Env: []v1.EnvVar{{Name: "hui", Value: "buh"}},
+	}
+	generatedEnvs, err := generateEnvFromImage(imageStr)
+	if err != nil {
+		t.Fatalf("error generating env: %s", err)
+	}
+	env, err := evaluateEnv(artifact.Env, generatedEnvs...)
+	if err != nil {
+		t.Fatalf("unable to evaluate env variables: %s", err)
+	}
+
+	actual := env
+	expected := []v1.EnvVar{
+		{Name: "hui", Value: "buh"},
+		{Name: "IMAGE_REPO", Value: "why.com/is/this/such/a/long/repo/name"},
+		{Name: "IMAGE_NAME", Value: "testimage"},
+		{Name: "IMAGE_TAG", Value: "latest"},
+	}
+	testutil.CheckElementsMatch(t, expected, actual)
 }

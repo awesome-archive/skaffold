@@ -17,11 +17,12 @@ limitations under the License.
 package gcb
 
 import (
+	"path/filepath"
 	"testing"
 
 	cloudbuild "google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/jib"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
@@ -30,32 +31,53 @@ func TestJibMavenBuildSpec(t *testing.T) {
 	tests := []struct {
 		description  string
 		skipTests    bool
+		baseImage    string
 		expectedArgs []string
 	}{
 		{
 			description:  "skip tests",
 			skipTests:    true,
-			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME -Djib.console=plain jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive -DskipTests=true prepare-package jib:build -Dimage=img"},
+			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME --batch-mode jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive -DskipTests=true prepare-package jib:build -Dimage=img"},
 		},
 		{
 			description:  "do not skip tests",
 			skipTests:    false,
-			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME -Djib.console=plain jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive prepare-package jib:build -Dimage=img"},
+			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME --batch-mode jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive prepare-package jib:build -Dimage=img"},
+		},
+		{
+			description:  "custom base image",
+			baseImage:    "busybox",
+			skipTests:    false,
+			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME --batch-mode jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive prepare-package jib:build -Djib.from.image=busybox -Dimage=img"},
+		},
+		{
+			description:  "custom base image from required artifacts",
+			baseImage:    "img2",
+			skipTests:    false,
+			expectedArgs: []string{"-c", "mvn -Duser.home=$$HOME --batch-mode jib:_skaffold-fail-if-jib-out-of-date -Djib.requiredVersion=" + jib.MinimumJibMavenVersion + " --non-recursive prepare-package jib:build -Djib.from.image=img2:tag -Dimage=img"},
 		},
 	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			artifact := &latest.Artifact{
 				ArtifactType: latest.ArtifactType{
-					JibArtifact: &latest.JibArtifact{Type: string(jib.JibMaven)},
+					JibArtifact: &latest.JibArtifact{Type: string(jib.JibMaven), BaseImage: test.baseImage},
+				},
+				Dependencies: []*latest.ArtifactDependency{
+					{ImageName: "img2", Alias: "img2"},
+					{ImageName: "img3", Alias: "img3"},
 				},
 			}
 
-			builder := newBuilder(latest.GoogleCloudBuild{
+			builder := NewBuilder(&mockConfig{}, &latest.GoogleCloudBuild{
 				MavenImage: "maven:3.6.0",
 			})
 			builder.skipTests = test.skipTests
-
+			store := mockArtifactStore{
+				"img2": "img2:tag",
+				"img3": "img3:tag",
+			}
+			builder.ArtifactStore(store)
 			buildSpec, err := builder.buildSpec(artifact, "img", "bucket", "object")
 			t.CheckNoError(err)
 
@@ -66,7 +88,7 @@ func TestJibMavenBuildSpec(t *testing.T) {
 			}}
 
 			t.CheckDeepEqual(expected, buildSpec.Steps)
-			t.CheckDeepEqual(0, len(buildSpec.Images))
+			t.CheckEmpty(buildSpec.Images)
 		})
 	}
 }
@@ -80,12 +102,12 @@ func TestJibGradleBuildSpec(t *testing.T) {
 		{
 			description:  "skip tests",
 			skipTests:    true,
-			expectedArgs: []string{"-c", "gradle -Duser.home=$$HOME -Djib.console=plain _skaffoldFailIfJibOutOfDate -Djib.requiredVersion=" + jib.MinimumJibGradleVersion + " :jib --image=img -x test"},
+			expectedArgs: []string{"-c", "gradle -Duser.home=$$HOME --console=plain _skaffoldFailIfJibOutOfDate -Djib.requiredVersion=" + jib.MinimumJibGradleVersion + " :jib -x test --image=img"},
 		},
 		{
 			description:  "do not skip tests",
 			skipTests:    false,
-			expectedArgs: []string{"-c", "gradle -Duser.home=$$HOME -Djib.console=plain _skaffoldFailIfJibOutOfDate -Djib.requiredVersion=" + jib.MinimumJibGradleVersion + " :jib --image=img"},
+			expectedArgs: []string{"-c", "gradle -Duser.home=$$HOME --console=plain _skaffoldFailIfJibOutOfDate -Djib.requiredVersion=" + jib.MinimumJibGradleVersion + " :jib --image=img"},
 		},
 	}
 	for _, test := range tests {
@@ -96,7 +118,7 @@ func TestJibGradleBuildSpec(t *testing.T) {
 				},
 			}
 
-			builder := newBuilder(latest.GoogleCloudBuild{
+			builder := NewBuilder(&mockConfig{}, &latest.GoogleCloudBuild{
 				GradleImage: "gradle:5.1.1",
 			})
 			builder.skipTests = test.skipTests
@@ -111,7 +133,65 @@ func TestJibGradleBuildSpec(t *testing.T) {
 			}}
 
 			t.CheckDeepEqual(expected, buildSpec.Steps)
-			t.CheckDeepEqual(0, len(buildSpec.Images))
+			t.CheckEmpty(buildSpec.Images)
+		})
+	}
+}
+
+func TestJibAddWorkspaceToDependencies(t *testing.T) {
+	tests := []struct {
+		description       string
+		workspacePaths    []string
+		dependencies      []string
+		expectedWorkspace []string
+	}{
+		{
+			description:       "basic test",
+			workspacePaths:    []string{"a/b/file", "c/file", "file"},
+			dependencies:      []string{"dependencyA", "dependencyB"},
+			expectedWorkspace: []string{"", "/a", "/a/b", "/a/b/file", "/c", "/c/file", "/file"},
+		},
+		{
+			description:       "ignore target with pom",
+			workspacePaths:    []string{"pom.xml", "target/fileA", "target/fileB", "watchedFile"},
+			dependencies:      []string{"dependencyA", "dependencyB"},
+			expectedWorkspace: []string{"", "/pom.xml", "/watchedFile"},
+		},
+		{
+			description:       "don't ignore target without pom",
+			workspacePaths:    []string{"target/fileA", "target/fileB", "watchedFile"},
+			dependencies:      []string{"dependencyA", "dependencyB"},
+			expectedWorkspace: []string{"", "/target", "/target/fileA", "/target/fileB", "/watchedFile"},
+		},
+		{
+			description:       "ignore build with build.gradle",
+			workspacePaths:    []string{"build.gradle", "build/fileA", "build/fileB", "watchedFile"},
+			dependencies:      []string{"dependencyA", "dependencyB"},
+			expectedWorkspace: []string{"", "/build.gradle", "/watchedFile"},
+		},
+		{
+			description:       "don't ignore build without build.gradle",
+			workspacePaths:    []string{"build/fileA", "build/fileB", "watchedFile"},
+			dependencies:      []string{"dependencyA", "dependencyB"},
+			expectedWorkspace: []string{"", "/build", "/build/fileA", "/build/fileB", "/watchedFile"},
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := t.NewTempDir()
+			for _, f := range test.workspacePaths {
+				tmpDir.Write(filepath.FromSlash(f), "")
+			}
+
+			for i := range test.expectedWorkspace {
+				test.expectedWorkspace[i] = tmpDir.Root() + filepath.FromSlash(test.expectedWorkspace[i])
+			}
+			expectedDependencies := append(test.dependencies, test.expectedWorkspace...)
+
+			actualDepedencies, err := jibAddWorkspaceToDependencies(tmpDir.Root(), test.dependencies)
+
+			t.CheckNoError(err)
+			t.CheckDeepEqual(expectedDependencies, actualDepedencies)
 		})
 	}
 }

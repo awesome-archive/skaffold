@@ -17,18 +17,19 @@ limitations under the License.
 package kubernetes
 
 import (
+	"context"
 	"testing"
-
-	v1 "k8s.io/api/core/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	batchv1beta1 "k8s.io/api/batch/v1beta1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
 
+	kubernetesclient "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/client"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
@@ -102,9 +103,9 @@ func TestTopLevelOwnerKey(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			client := fakekubeclientset.NewSimpleClientset(test.objects...)
-			t.Override(&Client, mockClient(client))
+			t.Override(&kubernetesclient.Client, mockClient(client))
 
-			actual := TopLevelOwnerKey(test.initialObject, test.kind)
+			actual := TopLevelOwnerKey(context.Background(), test.initialObject, test.kind)
 
 			t.CheckDeepEqual(test.expected, actual)
 		})
@@ -278,9 +279,9 @@ func TestOwnerMetaObject(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			client := fakekubeclientset.NewSimpleClientset(test.objects...)
-			t.Override(&Client, mockClient(client))
+			t.Override(&kubernetesclient.Client, mockClient(client))
 
-			actual, err := ownerMetaObject("ns", test.or)
+			actual, err := ownerMetaObject(context.Background(), "ns", test.or)
 
 			t.CheckNoError(err)
 			t.CheckDeepEqual(test.expected, actual)

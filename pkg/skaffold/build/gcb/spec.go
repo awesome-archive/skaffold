@@ -19,9 +19,9 @@ package gcb
 import (
 	"fmt"
 
-	"github.com/pkg/errors"
 	cloudbuild "google.golang.org/api/cloudbuild/v1"
 
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/misc"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 )
 
@@ -40,30 +40,34 @@ func (b *Builder) buildSpec(artifact *latest.Artifact, tag, bucket, object strin
 			Object: object,
 		},
 	}
-	buildSpec.Options = &cloudbuild.BuildOptions{
-		DiskSizeGb:  b.DiskSizeGb,
-		MachineType: b.MachineType,
+	if buildSpec.Options == nil {
+		buildSpec.Options = &cloudbuild.BuildOptions{}
 	}
+	buildSpec.Options.DiskSizeGb = b.DiskSizeGb
+	buildSpec.Options.MachineType = b.MachineType
+	buildSpec.Options.WorkerPool = b.WorkerPool
+	buildSpec.Options.Logging = b.Logging
+	buildSpec.Options.LogStreamingOption = b.LogStreamingOption
 	buildSpec.Timeout = b.Timeout
 
 	return buildSpec, nil
 }
 
-func (b *Builder) buildSpecForArtifact(artifact *latest.Artifact, tag string) (cloudbuild.Build, error) {
+func (b *Builder) buildSpecForArtifact(a *latest.Artifact, tag string) (cloudbuild.Build, error) {
 	switch {
-	case artifact.KanikoArtifact != nil:
-		return b.kanikoBuildSpec(artifact.KanikoArtifact, tag)
+	case a.KanikoArtifact != nil:
+		return b.kanikoBuildSpec(a, tag)
 
-	case artifact.DockerArtifact != nil:
-		return b.dockerBuildSpec(artifact.DockerArtifact, tag)
+	case a.DockerArtifact != nil:
+		return b.dockerBuildSpec(a, tag)
 
-	case artifact.JibArtifact != nil:
-		return b.jibBuildSpec(artifact, tag)
+	case a.JibArtifact != nil:
+		return b.jibBuildSpec(a, tag)
 
-	case artifact.BazelArtifact != nil:
-		return cloudbuild.Build{}, errors.New("skaffold can't build a bazel artifact with Google Cloud Build")
+	case a.BuildpackArtifact != nil:
+		return b.buildpackBuildSpec(a.BuildpackArtifact, tag, a.Dependencies)
 
 	default:
-		return cloudbuild.Build{}, fmt.Errorf("undefined artifact type: %+v", artifact.ArtifactType)
+		return cloudbuild.Build{}, fmt.Errorf("unexpected type %q for gcb artifact:\n%s", misc.ArtifactType(a), misc.FormatArtifact(a))
 	}
 }

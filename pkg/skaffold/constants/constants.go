@@ -17,9 +17,6 @@ limitations under the License.
 package constants
 
 import (
-	"fmt"
-	"runtime"
-
 	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
@@ -42,34 +39,22 @@ const (
 
 	DefaultKustomizationPath = "."
 
-	DefaultKanikoImage                  = "gcr.io/kaniko-project/executor:4ce8b8db817047f0be7a78c0fdffab71f797e8f8@sha256:fe1b5a428273309088fb6df563f4d88ab806fe602a7b0b3e8fbe1d7ee5f9ead0"
-	DefaultKanikoSecretName             = "kaniko-secret"
-	DefaultKanikoTimeout                = "20m"
-	DefaultKanikoContainerName          = "kaniko"
-	DefaultKanikoEmptyDirName           = "kaniko-emptydir"
-	DefaultKanikoEmptyDirMountPath      = "/kaniko/buildcontext"
-	DefaultKanikoCacheDirName           = "kaniko-cache"
-	DefaultKanikoCacheDirMountPath      = "/cache"
-	DefaultKanikoDockerConfigSecretName = "docker-cfg"
-	DefaultKanikoDockerConfigPath       = "/kaniko/.docker"
-	DefaultKanikoSecretMountPath        = "/secret"
+	DefaultBusyboxImage = "gcr.io/k8s-skaffold/skaffold-helpers/busybox"
 
-	DefaultBusyboxImage = "busybox"
-
-	UpdateCheckEnvironmentVariable = "SKAFFOLD_UPDATE_CHECK"
-
-	DefaultCloudBuildDockerImage = "gcr.io/cloud-builders/docker"
-	DefaultCloudBuildMavenImage  = "gcr.io/cloud-builders/mvn"
-	DefaultCloudBuildGradleImage = "gcr.io/cloud-builders/gradle"
-	DefaultCloudBuildKanikoImage = "gcr.io/kaniko-project/executor"
+	// DefaultDebugHelpersRegistry is the default location used for the helper images for `debug`.
+	DefaultDebugHelpersRegistry = "gcr.io/k8s-skaffold/skaffold-debug-support"
 
 	DefaultSkaffoldDir = ".skaffold"
 	DefaultCacheFile   = "cache"
+	DefaultMetricFile  = "metrics"
 
 	DefaultRPCPort     = 50051
 	DefaultRPCHTTPPort = 50052
 
 	DefaultPortForwardNamespace = "default"
+	DefaultPortForwardAddress   = "127.0.0.1"
+
+	DefaultProjectDescriptor = "project.toml"
 
 	LeeroyAppResponse = "leeroooooy app!!\n"
 )
@@ -77,6 +62,8 @@ const (
 var (
 	Pod     latest.ResourceType = "pod"
 	Service latest.ResourceType = "service"
+
+	DefaultLocalConcurrency = 1
 )
 
 var (
@@ -95,7 +82,7 @@ var (
 	// KubeContext is the expected kubecontext to build an artifact with a custom build script on cluster
 	KubeContext = "KUBE_CONTEXT"
 
-	// Namespace is the expected namsepace to build an artifact with a custom build script on cluster.
+	// Namespace is the expected namespace to build an artifact with a custom build script on cluster.
 	Namespace = "NAMESPACE"
 
 	// PullSecretName is the secret with authentication required to pull a base image/push the final image built on cluster.
@@ -108,9 +95,16 @@ var (
 	Timeout = "TIMEOUT"
 )
 
+var ImageRef = struct {
+	Repo   string
+	Tag    string
+	Digest string
+}{
+	Repo:   "IMAGE_REPO",
+	Tag:    "IMAGE_TAG",
+	Digest: "IMAGE_DIGEST",
+}
 var DefaultKubectlManifests = []string{"k8s/*.yaml"}
-
-var LatestDownloadURL = fmt.Sprintf("https://storage.googleapis.com/skaffold/releases/latest/skaffold-%s-%s", runtime.GOOS, runtime.GOARCH)
 
 var Labels = struct {
 	TagPolicy        string

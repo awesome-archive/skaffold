@@ -20,20 +20,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/google/go-cmp/cmp"
-
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
 func TestNewDlvSpecDefaults(t *testing.T) {
 	spec := newDlvSpec(20)
-	expected := dlvSpec{mode: "exec", host: "localhost", port: 20, apiVersion: 2, headless: true, log: false}
+	expected := dlvSpec{mode: "exec", port: 20, apiVersion: 2, headless: true, log: false}
 	testutil.CheckDeepEqual(t, expected, spec, cmp.AllowUnexported(spec))
 }
 
@@ -51,13 +50,15 @@ func TestExtractDlvArg(t *testing.T) {
 		{[]string{"dlv", "test", "--headless", "--listen=host:4345"}, &dlvSpec{mode: "test", host: "host", port: 4345, headless: true, apiVersion: 2, log: false}},
 		{[]string{"dlv", "debug", "--headless", "--api-version=1"}, &dlvSpec{mode: "debug", headless: true, apiVersion: 1, log: false}},
 		{[]string{"dlv", "debug", "--listen=host:4345", "--headless", "--api-version=2", "--log"}, &dlvSpec{mode: "debug", host: "host", port: 4345, headless: true, apiVersion: 2, log: true}},
+		{[]string{"dlv", "debug", "--listen=:4345"}, &dlvSpec{mode: "debug", port: 4345, apiVersion: 2}},
+		{[]string{"dlv", "debug", "--listen=host:"}, &dlvSpec{mode: "debug", host: "host", apiVersion: 2}},
 	}
 	for _, test := range tests {
-		t.Run(strings.Join(test.in, " "), func(t *testing.T) {
+		testutil.Run(t, strings.Join(test.in, " "), func(t *testutil.T) {
 			if test.result == nil {
-				testutil.CheckDeepEqual(t, test.result, extractDlvSpec(test.in))
+				t.CheckDeepEqual(test.result, extractDlvSpec(test.in))
 			} else {
-				testutil.CheckDeepEqual(t, *test.result, *extractDlvSpec(test.in), cmp.AllowUnexported(dlvSpec{}))
+				t.CheckDeepEqual(*test.result, *extractDlvSpec(test.in), cmp.AllowUnexported(dlvSpec{}))
 			}
 		})
 	}
@@ -67,6 +68,7 @@ func TestDlvTransformer_IsApplicable(t *testing.T) {
 	tests := []struct {
 		description string
 		source      imageConfiguration
+		launcher    string
 		result      bool
 	}{
 		{
@@ -95,6 +97,12 @@ func TestDlvTransformer_IsApplicable(t *testing.T) {
 			result:      true,
 		},
 		{
+			description: "launcher entrypoint",
+			source:      imageConfiguration{entrypoint: []string{"launcher"}, arguments: []string{"dlv", "exec", "--headless"}},
+			launcher:    "launcher",
+			result:      true,
+		},
+		{
 			description: "entrypoint /bin/sh",
 			source:      imageConfiguration{entrypoint: []string{"/bin/sh"}},
 			result:      false,
@@ -107,15 +115,13 @@ func TestDlvTransformer_IsApplicable(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.Override(&entrypointLaunchers, []string{test.launcher})
 			result := dlvTransformer{}.IsApplicable(test.source)
-			testutil.CheckDeepEqual(t, test.result, result)
+
+			t.CheckDeepEqual(test.result, result)
 		})
 	}
-}
-
-func TestDlvTransformer_RuntimeSupportImage(t *testing.T) {
-	testutil.CheckDeepEqual(t, "go", dlvTransformer{}.RuntimeSupportImage())
 }
 
 func TestDlvTransformerApply(t *testing.T) {
@@ -123,22 +129,27 @@ func TestDlvTransformerApply(t *testing.T) {
 		description   string
 		containerSpec v1.Container
 		configuration imageConfiguration
+		shouldErr     bool
 		result        v1.Container
+		debugConfig   ContainerDebugConfiguration
+		image         string
 	}{
 		{
 			description:   "empty",
 			containerSpec: v1.Container{},
 			configuration: imageConfiguration{},
-			result:        v1.Container{},
+			shouldErr:     true,
 		},
 		{
 			description:   "basic",
 			containerSpec: v1.Container{},
 			configuration: imageConfiguration{entrypoint: []string{"app", "arg"}},
 			result: v1.Container{
-				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 				Ports:   []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 			},
+			debugConfig: ContainerDebugConfiguration{Runtime: "go", Ports: map[string]uint32{"dlv": 56268}},
+			image:       "go",
 		},
 		{
 			description: "existing port",
@@ -147,27 +158,62 @@ func TestDlvTransformerApply(t *testing.T) {
 			},
 			configuration: imageConfiguration{entrypoint: []string{"app", "arg"}},
 			result: v1.Container{
-				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 				Ports:   []v1.ContainerPort{{Name: "http-server", ContainerPort: 8080}, {Name: "dlv", ContainerPort: 56268}},
 			},
+			debugConfig: ContainerDebugConfiguration{Runtime: "go", Ports: map[string]uint32{"dlv": 56268}},
+			image:       "go",
+		},
+		{
+			description: "existing dlv port",
+			containerSpec: v1.Container{
+				Ports: []v1.ContainerPort{{Name: "dlv", ContainerPort: 7896}},
+			},
+			configuration: imageConfiguration{entrypoint: []string{"app", "arg"}},
+			result: v1.Container{
+				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
+				Ports:   []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
+			},
+			debugConfig: ContainerDebugConfiguration{Runtime: "go", Ports: map[string]uint32{"dlv": 56268}},
+			image:       "go",
 		},
 		{
 			description:   "command not entrypoint",
 			containerSpec: v1.Container{},
 			configuration: imageConfiguration{arguments: []string{"app", "arg"}},
 			result: v1.Container{
-				Args:  []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+				Args:  []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 				Ports: []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 			},
+			debugConfig: ContainerDebugConfiguration{Runtime: "go", Ports: map[string]uint32{"dlv": 56268}},
+			image:       "go",
+		},
+		{
+			description: "entrypoint with args in container spec",
+			containerSpec: v1.Container{
+				Args: []string{"arg1", "arg2"},
+			},
+			configuration: imageConfiguration{entrypoint: []string{"app"}},
+			result: v1.Container{
+				Command: []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--"},
+				Args:    []string{"arg1", "arg2"},
+				Ports:   []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
+			},
+			debugConfig: ContainerDebugConfiguration{Runtime: "go", Ports: map[string]uint32{"dlv": 56268}},
+			image:       "go",
 		},
 	}
 	var identity portAllocator = func(port int32) int32 {
 		return port
 	}
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
-			dlvTransformer{}.Apply(&test.containerSpec, test.configuration, identity)
-			testutil.CheckDeepEqual(t, test.result, test.containerSpec)
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			config, image, err := dlvTransformer{}.Apply(&test.containerSpec, test.configuration, identity)
+
+			t.CheckError(test.shouldErr, err)
+			t.CheckDeepEqual(test.result, test.containerSpec)
+			t.CheckDeepEqual(test.debugConfig, config)
+			t.CheckDeepEqual(test.image, image)
 		})
 	}
 }
@@ -211,19 +257,19 @@ func TestTransformManifestDelve(t *testing.T) {
 			true,
 			&v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+					Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 				},
 				Spec: v1.PodSpec{
 					Containers: []v1.Container{{
 						Name:         "test",
-						Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+						Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 						Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 						Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 						VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 					}},
 					InitContainers: []v1.Container{{
-						Name:         "install-go-support",
-						Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+						Name:         "install-go-debug-support",
+						Image:        "HELPERS/go",
 						VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 					}},
 					Volumes: []v1.Volume{{
@@ -254,19 +300,19 @@ func TestTransformManifestDelve(t *testing.T) {
 					Replicas: int32p(1),
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -297,19 +343,19 @@ func TestTransformManifestDelve(t *testing.T) {
 					Replicas: int32p(1),
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -340,19 +386,19 @@ func TestTransformManifestDelve(t *testing.T) {
 					Replicas: int32p(1),
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -381,19 +427,19 @@ func TestTransformManifestDelve(t *testing.T) {
 				Spec: appsv1.DaemonSetSpec{
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -422,19 +468,19 @@ func TestTransformManifestDelve(t *testing.T) {
 				Spec: batchv1.JobSpec{
 					Template: v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -465,19 +511,19 @@ func TestTransformManifestDelve(t *testing.T) {
 					Replicas: int32p(1),
 					Template: &v1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -518,19 +564,19 @@ func TestTransformManifestDelve(t *testing.T) {
 						}},
 					{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"dlv":56268,"runtime":"go"}}`},
+							Annotations: map[string]string{"debug.cloud.google.com/config": `{"test":{"runtime":"go","ports":{"dlv":56268}}}`},
 						},
 						Spec: v1.PodSpec{
 							Containers: []v1.Container{{
 								Name:         "test",
-								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=localhost:56268", "--api-version=2", "app", "--", "arg"},
+								Command:      []string{"/dbg/go/bin/dlv", "exec", "--headless", "--continue", "--accept-multiclient", "--listen=:56268", "--api-version=2", "app", "--", "arg"},
 								Ports:        []v1.ContainerPort{{Name: "dlv", ContainerPort: 56268}},
 								Env:          []v1.EnvVar{{Name: "GOMAXPROCS", Value: "1"}},
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							InitContainers: []v1.Container{{
-								Name:         "install-go-support",
-								Image:        "gcr.io/gcp-dev-tools/duct-tape/go",
+								Name:         "install-go-debug-support",
+								Image:        "HELPERS/go",
 								VolumeMounts: []v1.VolumeMount{{Name: "debugging-support-files", MountPath: "/dbg"}},
 							}},
 							Volumes: []v1.Volume{{
@@ -542,15 +588,16 @@ func TestTransformManifestDelve(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.description, func(t *testing.T) {
+		testutil.Run(t, test.description, func(t *testutil.T) {
 			value := test.in.DeepCopyObject()
 
 			retriever := func(image string) (imageConfiguration, error) {
 				return imageConfiguration{}, nil
 			}
-			result := transformManifest(value, retriever)
-			testutil.CheckDeepEqual(t, test.transformed, result)
-			testutil.CheckDeepEqual(t, test.out, value)
+			result := transformManifest(value, retriever, "HELPERS")
+
+			t.CheckDeepEqual(test.transformed, result)
+			t.CheckDeepEqual(test.out, value)
 		})
 	}
 }

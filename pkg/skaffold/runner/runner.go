@@ -24,23 +24,31 @@ import (
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/cache"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/label"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/status"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/filemon"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/portforward"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/sync"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/test"
 )
 
+const (
+	remoteDigestSource = "remote"
+	noneDigestSource   = "none"
+)
+
 // Runner is responsible for running the skaffold build, test and deploy config.
 type Runner interface {
-	DiagnoseArtifacts(context.Context, io.Writer) error
 	Dev(context.Context, io.Writer, []*latest.Artifact) error
-	BuildAndTest(context.Context, io.Writer, []*latest.Artifact) ([]build.Artifact, error)
+	ApplyDefaultRepo(tag string) (string, error)
+	Build(context.Context, io.Writer, []*latest.Artifact) ([]build.Artifact, error)
+	Test(context.Context, io.Writer, []build.Artifact) error
 	DeployAndLog(context.Context, io.Writer, []build.Artifact) error
-	GeneratePipeline(context.Context, io.Writer, *latest.SkaffoldConfig, []string, string) error
-	Render(context.Context, io.Writer, []build.Artifact, string) error
+	GeneratePipeline(context.Context, io.Writer, []*latest.SkaffoldConfig, []string, string) error
+	Render(context.Context, io.Writer, []build.Artifact, bool, string) error
 	Cleanup(context.Context, io.Writer) error
 	Prune(context.Context, io.Writer) error
 	HasDeployed() bool
@@ -49,36 +57,34 @@ type Runner interface {
 
 // SkaffoldRunner is responsible for running the skaffold build, test and deploy config.
 type SkaffoldRunner struct {
-	builder          build.Builder
-	deployer         deploy.Deployer
-	tester           test.Tester
-	tagger           tag.Tagger
-	syncer           sync.Syncer
-	monitor          filemon.Monitor
-	listener         Listener
-	forwarderManager *portforward.ForwarderManager
+	builder  build.Builder
+	deployer deploy.Deployer
+	tester   test.Tester
+	tagger   tag.Tagger
+	syncer   sync.Syncer
+	monitor  filemon.Monitor
+	listener Listener
 
-	logger               *kubernetes.LogAggregator
-	cache                cache.Cache
-	changeSet            *changeSet
-	runCtx               *runcontext.RunContext
-	labellers            []deploy.Labeller
-	defaultLabeller      *deploy.DefaultLabeller
-	portForwardResources []*latest.PortForwardResource
-	builds               []build.Artifact
-
+	kubectlCLI    *kubectl.CLI
+	cache         cache.Cache
+	changeSet     changeSet
+	runCtx        *runcontext.RunContext
+	labeller      *label.DefaultLabeller
+	builds        []build.Artifact
+	artifactStore build.ArtifactStore
 	// podSelector is used to determine relevant pods for logging and portForwarding
 	podSelector *kubernetes.ImageList
 
-	imagesAreLocal bool
-	hasBuilt       bool
-	hasDeployed    bool
-	intents        *intents
+	isLocalImage func(imageName string) (bool, error)
+	hasBuilt     bool
+	hasDeployed  bool
+	intents      *intents
+	devIteration int
 }
 
 // for testing
 var (
-	statusCheck = deploy.StatusCheck
+	newStatusCheck = status.NewStatusChecker
 )
 
 // HasDeployed returns true if this runner has deployed something.

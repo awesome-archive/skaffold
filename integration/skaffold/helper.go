@@ -19,6 +19,7 @@ package skaffold
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -26,9 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 
+	"github.com/GoogleContainerTools/skaffold/cmd/skaffold/app/cmd"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
@@ -38,6 +40,8 @@ type RunBuilder struct {
 	configFile string
 	dir        string
 	ns         string
+	repo       string
+	profiles   []string
 	args       []string
 	env        []string
 	stdin      []byte
@@ -45,56 +49,85 @@ type RunBuilder struct {
 
 // Dev runs `skaffold dev` with the given arguments.
 func Dev(args ...string) *RunBuilder {
-	return &RunBuilder{command: "dev", args: args}
+	return withDefaults("dev", args)
 }
 
 // Fix runs `skaffold fix` with the given arguments.
 func Fix(args ...string) *RunBuilder {
-	return &RunBuilder{command: "fix", args: args}
+	return withDefaults("fix", args)
 }
 
 // Build runs `skaffold build` with the given arguments.
 func Build(args ...string) *RunBuilder {
-	return &RunBuilder{command: "build", args: args}
+	return withDefaults("build", args)
+}
+
+// Test runs `skaffold test` with the given arguments.
+func Test(args ...string) *RunBuilder {
+	return withDefaults("test", args)
 }
 
 // Deploy runs `skaffold deploy` with the given arguments.
 func Deploy(args ...string) *RunBuilder {
-	return &RunBuilder{command: "deploy", args: args}
+	return withDefaults("deploy", args)
 }
 
 // Debug runs `skaffold debug` with the given arguments.
 func Debug(args ...string) *RunBuilder {
-	return &RunBuilder{command: "debug", args: args}
+	return withDefaults("debug", args)
 }
 
 // Run runs `skaffold run` with the given arguments.
 func Run(args ...string) *RunBuilder {
-	return &RunBuilder{command: "run", args: args}
+	return withDefaults("run", args)
 }
 
 // Delete runs `skaffold delete` with the given arguments.
 func Delete(args ...string) *RunBuilder {
-	return &RunBuilder{command: "delete", args: args}
+	return withDefaults("delete", args)
 }
 
 // Config runs `skaffold config` with the given arguments.
 func Config(args ...string) *RunBuilder {
-	return &RunBuilder{command: "config", args: args}
+	return withDefaults("config", args)
 }
 
 // Init runs `skaffold init` with the given arguments.
 func Init(args ...string) *RunBuilder {
-	return &RunBuilder{command: "init", args: args}
+	return withDefaults("init", args)
 }
 
 // Diagnose runs `skaffold diagnose` with the given arguments.
 func Diagnose(args ...string) *RunBuilder {
-	return &RunBuilder{command: "diagnose", args: args}
+	return withDefaults("diagnose", args)
+}
+
+// Schema runs `skaffold schema` with the given arguments.
+func Schema(args ...string) *RunBuilder {
+	return &RunBuilder{command: "schema", args: args}
+}
+
+// Credits runs `skaffold credits` with the given arguments.
+func Credits(args ...string) *RunBuilder {
+	return &RunBuilder{command: "credits", args: args}
+}
+
+// Render runs `skaffold render` with the given arguments.
+func Render(args ...string) *RunBuilder {
+	return withDefaults("render", args)
+}
+
+// Filter runs `skaffold filter` with the given arguments.
+func Filter(args ...string) *RunBuilder {
+	return withDefaults("filter", args)
 }
 
 func GeneratePipeline(args ...string) *RunBuilder {
-	return &RunBuilder{command: "generate-pipeline", args: args}
+	return withDefaults("generate-pipeline", args)
+}
+
+func withDefaults(command string, args []string) *RunBuilder {
+	return &RunBuilder{command: command, args: args, repo: "gcr.io/k8s-skaffold"}
 }
 
 // InDir sets the directory in which skaffold is running.
@@ -106,6 +139,12 @@ func (b *RunBuilder) InDir(dir string) *RunBuilder {
 // WithConfig sets the config file to be used by skaffold.
 func (b *RunBuilder) WithConfig(configFile string) *RunBuilder {
 	b.configFile = configFile
+	return b
+}
+
+// WithRepo sets the default repository to be used by skaffold.
+func (b *RunBuilder) WithRepo(repo string) *RunBuilder {
+	b.repo = repo
 	return b
 }
 
@@ -127,23 +166,45 @@ func (b *RunBuilder) WithEnv(env []string) *RunBuilder {
 	return b
 }
 
-// RunBackground runs the skaffold command in the background.
-// Returns a teardown function that stops skaffold.
-func (b *RunBuilder) RunBackground(t *testing.T) context.CancelFunc {
-	_, cancel := b.RunBackgroundOutput(t)
-	return cancel
+// WithProfiles sets profiles.
+func (b *RunBuilder) WithProfiles(profiles []string) *RunBuilder {
+	b.profiles = profiles
+	return b
 }
 
-// RunBackgroundOutput runs the skaffold command in the background.
-// Returns a teardown function that stops skaffold.
-func (b *RunBuilder) RunBackgroundOutput(t *testing.T) (io.ReadCloser, context.CancelFunc) {
+// RunBackground runs the skaffold command in the background.  The Skaffold output
+// is accumulated and logged on test failure.
+func (b *RunBuilder) RunBackground(t *testing.T) {
+	t.Helper()
+	out := bytes.Buffer{}
+	b.runForked(t, &out)
+
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Log("Skaffold log:\n", strings.ReplaceAll(out.String(), "\n", "\n> "))
+		}
+	})
+}
+
+// RunLive runs the skaffold command in the background with live output.
+func (b *RunBuilder) RunLive(t *testing.T) io.ReadCloser {
+	t.Helper()
+	pr, pw := io.Pipe()
+	b.runForked(t, pw)
+	t.Cleanup(func() {
+		pr.Close()
+	})
+	return pr
+}
+
+// runForked runs the skaffold command in the background with stdout sent to the provided writer.
+func (b *RunBuilder) runForked(t *testing.T, out io.Writer) {
 	t.Helper()
 
-	pr, pw := io.Pipe()
-
 	ctx, cancel := context.WithCancel(context.Background())
+
 	cmd := b.cmd(ctx)
-	cmd.Stdout = pw
+	cmd.Stdout = out
 	logrus.Infoln(cmd.Args)
 
 	start := time.Now()
@@ -156,11 +217,10 @@ func (b *RunBuilder) RunBackgroundOutput(t *testing.T) (io.ReadCloser, context.C
 		logrus.Infoln("Ran in", time.Since(start))
 	}()
 
-	return pr, func() {
+	t.Cleanup(func() {
 		cancel()
 		cmd.Wait()
-		pr.Close()
-	}
+	})
 }
 
 // RunOrFail runs the skaffold command and fails the test
@@ -178,7 +238,7 @@ func (b *RunBuilder) Run(t *testing.T) error {
 
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "skaffold %s", b.command)
+		return fmt.Errorf("skaffold %q: %w", b.command, err)
 	}
 
 	logrus.Infoln("Ran in", time.Since(start))
@@ -196,7 +256,7 @@ func (b *RunBuilder) RunWithCombinedOutput(t *testing.T) ([]byte, error) {
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return out, errors.Wrapf(err, "skaffold %s", b.command)
+		return out, fmt.Errorf("skaffold %q: %w", b.command, err)
 	}
 
 	logrus.Infoln("Ran in", time.Since(start))
@@ -228,15 +288,27 @@ func (b *RunBuilder) RunOrFailOutput(t *testing.T) []byte {
 
 func (b *RunBuilder) cmd(ctx context.Context) *exec.Cmd {
 	args := []string{b.command}
-	if b.ns != "" {
+	command := b.getCobraCommand()
+
+	if b.ns != "" && command.Flags().Lookup("namespace") != nil {
 		args = append(args, "--namespace", b.ns)
 	}
-	if b.configFile != "" {
+	if b.configFile != "" && command.Flags().ShorthandLookup("f") != nil {
 		args = append(args, "-f", b.configFile)
+	}
+	if b.repo != "" && command.Flags().Lookup("default-repo") != nil {
+		args = append(args, "--default-repo", b.repo)
+	}
+	if len(b.profiles) > 0 && command.Flags().Lookup("profile") != nil {
+		args = append(args, "--profile", strings.Join(b.profiles, ","))
 	}
 	args = append(args, b.args...)
 
-	cmd := exec.CommandContext(ctx, "skaffold", args...)
+	skaffoldBinary := "skaffold"
+	if value, found := os.LookupEnv("SKAFFOLD_BINARY"); found {
+		skaffoldBinary = value
+	}
+	cmd := exec.CommandContext(ctx, skaffoldBinary, args...)
 	cmd.Env = append(removeSkaffoldEnvVariables(util.OSEnviron()), b.env...)
 	if b.stdin != nil {
 		cmd.Stdin = bytes.NewReader(b.stdin)
@@ -262,8 +334,20 @@ func (b *RunBuilder) cmd(ctx context.Context) *exec.Cmd {
 	return cmd
 }
 
+// getCobraCommand returns the matching cobra command for the command
+// in b, or return a dummy without flags
+func (b *RunBuilder) getCobraCommand() *cobra.Command {
+	c := cmd.NewSkaffoldCommand(os.Stdout, os.Stderr)
+	for _, comm := range c.Commands() {
+		if comm.Name() == b.command {
+			return comm
+		}
+	}
+	return &cobra.Command{}
+}
+
 // removeSkaffoldEnvVariables makes sure Skaffold runs without
-// any env variable that might change its behaviour, such as
+// any env variable that might change its behavior, such as
 // enabling caching.
 func removeSkaffoldEnvVariables(env []string) []string {
 	var clean []string

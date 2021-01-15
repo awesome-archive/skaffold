@@ -17,11 +17,14 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	sErrors "github.com/GoogleContainerTools/skaffold/pkg/skaffold/errors"
 )
 
 // Builder is used to build cobra commands.
@@ -29,11 +32,13 @@ type Builder interface {
 	WithDescription(description string) Builder
 	WithLongDescription(long string) Builder
 	WithExample(comment, command string) Builder
-	WithFlags(adder func(*pflag.FlagSet)) Builder
+	WithFlagAdder(adder func(*pflag.FlagSet)) Builder
+	WithFlags([]*Flag) Builder
+	WithHouseKeepingMessages() Builder
 	WithCommonFlags() Builder
 	Hidden() Builder
-	ExactArgs(argCount int, action func(io.Writer, []string) error) *cobra.Command
-	NoArgs(action func(io.Writer) error) *cobra.Command
+	ExactArgs(argCount int, action func(context.Context, io.Writer, []string) error) *cobra.Command
+	NoArgs(action func(context.Context, io.Writer) error) *cobra.Command
 }
 
 type builder struct {
@@ -68,12 +73,29 @@ func (b *builder) WithExample(comment, command string) Builder {
 }
 
 func (b *builder) WithCommonFlags() Builder {
-	AddFlags(b.cmd.Flags(), b.cmd.Use)
+	AddFlags(&b.cmd)
 	return b
 }
 
-func (b *builder) WithFlags(adder func(*pflag.FlagSet)) Builder {
+func (b *builder) WithHouseKeepingMessages() Builder {
+	allowHouseKeepingMessages(&b.cmd)
+	return b
+}
+
+func (b *builder) WithFlagAdder(adder func(*pflag.FlagSet)) Builder {
 	adder(b.cmd.Flags())
+	return b
+}
+
+func (b *builder) WithFlags(flags []*Flag) Builder {
+	for _, f := range flags {
+		fl := f.flag()
+		b.cmd.Flags().AddFlag(fl)
+	}
+	b.cmd.PreRun = func(cmd *cobra.Command, args []string) {
+		ParseFlags(cmd, flags)
+	}
+
 	return b
 }
 
@@ -82,18 +104,38 @@ func (b *builder) Hidden() Builder {
 	return b
 }
 
-func (b *builder) ExactArgs(argCount int, action func(io.Writer, []string) error) *cobra.Command {
+func (b *builder) ExactArgs(argCount int, action func(context.Context, io.Writer, []string) error) *cobra.Command {
 	b.cmd.Args = cobra.ExactArgs(argCount)
 	b.cmd.RunE = func(_ *cobra.Command, args []string) error {
-		return action(b.cmd.OutOrStdout(), args)
+		err := handleWellKnownErrors(action(b.cmd.Context(), b.cmd.OutOrStdout(), args))
+		// clean up server at end of the execution since post run hooks are only executed if
+		// RunE is successful
+		if shutdownAPIServer != nil {
+			shutdownAPIServer()
+		}
+		return err
 	}
 	return &b.cmd
 }
 
-func (b *builder) NoArgs(action func(io.Writer) error) *cobra.Command {
+func (b *builder) NoArgs(action func(context.Context, io.Writer) error) *cobra.Command {
 	b.cmd.Args = cobra.NoArgs
 	b.cmd.RunE = func(*cobra.Command, []string) error {
-		return action(b.cmd.OutOrStdout())
+		err := handleWellKnownErrors(action(b.cmd.Context(), b.cmd.OutOrStdout()))
+		// clean up server at end of the execution since post run hooks are only executed if
+		// RunE is successful
+		if shutdownAPIServer != nil {
+			shutdownAPIServer()
+		}
+		return err
 	}
 	return &b.cmd
+}
+
+func handleWellKnownErrors(err error) error {
+	if err == nil {
+		return err
+	}
+
+	return sErrors.ShowAIError(err)
 }

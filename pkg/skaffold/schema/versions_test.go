@@ -18,14 +18,19 @@ package schema
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/clientcmd/api"
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/kaniko"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/defaults"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v2beta8"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
@@ -74,26 +79,39 @@ deploy:
    - dep.yaml
    - svc.yaml
 `
-	minimalKanikoConfig = `
+	minimalClusterConfig = `
 build:
   artifacts:
   - image: image1
     context: ./examples/app1
-    kaniko:
-      buildContext:
-        gcsBucket: demo
+    kaniko: {}
   cluster: {}
 `
-	completeKanikoConfig = `
+	kanikoConfigMap = `
 build:
   artifacts:
   - image: image1
     context: ./examples/app1
     kaniko:
-      buildContext:
-        localDir: {}
+      volumeMounts:
+      - name: docker-config
+        mountPath: /kaniko/.docker
   cluster:
-    pullSecret: /secret.json
+    pullSecretName: "some-secret"
+    volumes:
+    - name: docker-config
+      configMap:
+        name: docker-config
+`
+
+	completeClusterConfig = `
+build:
+  artifacts:
+  - image: image1
+    context: ./examples/app1
+    kaniko: {}
+  cluster:
+    pullSecretPath: /secret.json
     pullSecretName: secret-name
     namespace: nskaniko
     timeout: 120m
@@ -101,6 +119,7 @@ build:
       secretName: config-name
       path: /kaniko/.docker
 `
+
 	badConfig = "bad config"
 
 	invalidStatusCheckConfig = `
@@ -111,123 +130,269 @@ deploy:
 deploy:
   statusCheckDeadlineSeconds: 10
 `
+
+	customLogPrefix = `
+deploy:
+  logs:
+    prefix: none
+`
 )
 
-func TestParseConfig(t *testing.T) {
+func TestIsSkaffoldConfig(t *testing.T) {
 	tests := []struct {
-		apiVersion  string
 		description string
-		config      string
-		expected    util.VersionedConfig
+		contents    string
+		isValid     bool
+	}{
+		{
+			description: "valid skaffold config",
+			contents: `apiVersion: skaffold/v1beta6
+kind: Config
+deploy:
+  kustomize: {}`,
+			isValid: true,
+		},
+		{
+			description: "not a valid format",
+			contents:    "test",
+			isValid:     false,
+		},
+		{
+			description: "invalid skaffold config version",
+			contents: `apiVersion: skaffold/v1beta100
+kind: Config
+deploy:
+  kustomize: {}`,
+			isValid: false,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			tmpDir := t.NewTempDir().
+				Write("skaffold.yaml", test.contents)
+
+			isValid := IsSkaffoldConfig(tmpDir.Path("skaffold.yaml"))
+
+			t.CheckDeepEqual(test.isValid, isValid)
+		})
+	}
+}
+
+func TestParseConfigAndUpgrade(t *testing.T) {
+	tests := []struct {
+		apiVersion  []string
+		description string
+		config      []string
+		expected    []util.VersionedConfig
 		shouldErr   bool
 	}{
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
+			description: "Kaniko Volume Mount - ConfigMap",
+			config:      []string{kanikoConfigMap},
+			expected: []util.VersionedConfig{config(
+				withClusterBuild("some-secret", "/secret", "default", "", "20m",
+					withGitTagger(),
+					withKanikoArtifact(),
+					withKanikoVolumeMount("docker-config", "/kaniko/.docker"),
+					withVolume(v1.Volume{
+						Name: "docker-config",
+						VolumeSource: v1.VolumeSource{
+							ConfigMap: &v1.ConfigMapVolumeSource{
+								LocalObjectReference: v1.LocalObjectReference{
+									Name: "docker-config",
+								},
+							},
+						},
+					})),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("container"),
+			)},
+		},
+		{
+			apiVersion:  []string{latest.Version},
 			description: "Minimal config",
-			config:      minimalConfig,
-			expected: config(
+			config:      []string{minimalConfig},
+			expected: []util.VersionedConfig{config(
 				withLocalBuild(
 					withGitTagger(),
 				),
 				withKubectlDeploy("k8s/*.yaml"),
-			),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  "skaffold/v1alpha1",
+			apiVersion:  []string{"skaffold/v1alpha1"},
 			description: "Old minimal config",
-			config:      minimalConfig,
-			expected: config(
+			config:      []string{minimalConfig},
+			expected: []util.VersionedConfig{config(
 				withLocalBuild(
 					withGitTagger(),
 				),
 				withKubectlDeploy("k8s/*.yaml"),
-			),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
 			description: "Simple config",
-			config:      simpleConfig,
-			expected: config(
+			config:      []string{simpleConfig},
+			expected: []util.VersionedConfig{config(
 				withLocalBuild(
 					withGitTagger(),
 					withDockerArtifact("example", ".", "Dockerfile"),
 				),
 				withKubectlDeploy("k8s/*.yaml"),
-			),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
 			description: "Complete config",
-			config:      completeConfig,
-			expected: config(
+			config:      []string{completeConfig},
+			expected: []util.VersionedConfig{config(
 				withGoogleCloudBuild("ID",
 					withShaTagger(),
 					withDockerArtifact("image1", "./examples/app1", "Dockerfile.dev"),
-					withBazelArtifact("image2", "./examples/app2", "//:example.tar"),
+					withBazelArtifact(),
 				),
 				withKubectlDeploy("dep.yaml", "svc.yaml"),
-			),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  latest.Version,
-			description: "Minimal Kaniko config",
-			config:      minimalKanikoConfig,
-			expected: config(
-				withClusterBuild("", "/secret", "default", "", "20m",
-					withGitTagger(),
-					withKanikoArtifact("image1", "./examples/app1", "Dockerfile", "demo"),
+			apiVersion:  []string{v2beta8.Version},
+			description: "Old version complete config",
+			config:      []string{completeConfig},
+			expected: []util.VersionedConfig{config(
+				withGoogleCloudBuild("ID",
+					withShaTagger(),
+					withDockerArtifact("image1", "./examples/app1", "Dockerfile.dev"),
+					withBazelArtifact(),
 				),
-				withKubectlDeploy("k8s/*.yaml"),
-			),
+				withKubectlDeploy("dep.yaml", "svc.yaml"),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  latest.Version,
-			description: "Complete Kaniko config",
-			config:      completeKanikoConfig,
-			expected: config(
+			apiVersion:  []string{latest.Version, latest.Version},
+			description: "Multiple complete config with same API versions",
+			config:      []string{completeConfig, completeClusterConfig},
+			expected: []util.VersionedConfig{config(
+				withGoogleCloudBuild("ID",
+					withShaTagger(),
+					withDockerArtifact("image1", "./examples/app1", "Dockerfile.dev"),
+					withBazelArtifact(),
+				),
+				withKubectlDeploy("dep.yaml", "svc.yaml"),
+				withLogsPrefix("container"),
+			), config(
 				withClusterBuild("secret-name", "/secret", "nskaniko", "/secret.json", "120m",
 					withGitTagger(),
 					withDockerConfig("config-name", "/kaniko/.docker"),
-					withKanikoArtifact("image1", "./examples/app1", "Dockerfile", ""),
+					withKanikoArtifact(),
 				),
 				withKubectlDeploy("k8s/*.yaml"),
-			),
+				withLogsPrefix("container"),
+			)},
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version, v2beta8.Version},
+			description: "Multiple complete config with different API versions",
+			config:      []string{completeConfig, completeClusterConfig},
+			expected: []util.VersionedConfig{config(
+				withGoogleCloudBuild("ID",
+					withShaTagger(),
+					withDockerArtifact("image1", "./examples/app1", "Dockerfile.dev"),
+					withBazelArtifact(),
+				),
+				withKubectlDeploy("dep.yaml", "svc.yaml"),
+				withLogsPrefix("container"),
+			), config(
+				withClusterBuild("secret-name", "/secret", "nskaniko", "/secret.json", "120m",
+					withGitTagger(),
+					withDockerConfig("config-name", "/kaniko/.docker"),
+					withKanikoArtifact(),
+				),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("container"),
+			)},
+		},
+		{
+			apiVersion:  []string{latest.Version},
+			description: "Minimal Cluster config",
+			config:      []string{minimalClusterConfig},
+			expected: []util.VersionedConfig{config(
+				withClusterBuild("", "/secret", "default", "", "20m",
+					withGitTagger(),
+					withKanikoArtifact(),
+				),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("container"),
+			)},
+		},
+		{
+			apiVersion:  []string{latest.Version},
+			description: "Complete Cluster config",
+			config:      []string{completeClusterConfig},
+			expected: []util.VersionedConfig{config(
+				withClusterBuild("secret-name", "/secret", "nskaniko", "/secret.json", "120m",
+					withGitTagger(),
+					withDockerConfig("config-name", "/kaniko/.docker"),
+					withKanikoArtifact(),
+				),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("container"),
+			)},
+		},
+		{
+			apiVersion:  []string{latest.Version},
 			description: "Bad config",
-			config:      badConfig,
+			config:      []string{badConfig},
 			shouldErr:   true,
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
 			description: "two taggers defined",
-			config:      invalidConfig,
+			config:      []string{invalidConfig},
 			shouldErr:   true,
 		},
 		{
-			apiVersion:  "",
+			apiVersion:  []string{""},
 			description: "ApiVersion not specified",
-			config:      minimalConfig,
+			config:      []string{minimalConfig},
 			shouldErr:   true,
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
 			description: "invalid statusCheckDeadline",
-			config:      invalidStatusCheckConfig,
+			config:      []string{invalidStatusCheckConfig},
 			shouldErr:   true,
 		},
 		{
-			apiVersion:  latest.Version,
+			apiVersion:  []string{latest.Version},
 			description: "valid statusCheckDeadline",
-			config:      validStatusCheckConfig,
-			expected: config(
+			config:      []string{validStatusCheckConfig},
+			expected: []util.VersionedConfig{config(
 				withLocalBuild(
 					withGitTagger(),
 				),
 				withKubectlDeploy("k8s/*.yaml"),
 				withStatusCheckDeadline(10),
-			),
+				withLogsPrefix("container"),
+			)},
+		},
+		{
+			apiVersion:  []string{latest.Version},
+			description: "custom log prefix",
+			config:      []string{customLogPrefix},
+			expected: []util.VersionedConfig{config(
+				withLocalBuild(
+					withGitTagger(),
+				),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("none"),
+			)},
 		},
 	}
 	for _, test := range tests {
@@ -235,17 +400,64 @@ func TestParseConfig(t *testing.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
 
 			tmpDir := t.NewTempDir().
-				Write("skaffold.yaml", fmt.Sprintf("apiVersion: %s\nkind: Config\n%s", test.apiVersion, test.config))
+				Write("skaffold.yaml", format(t, test.config, test.apiVersion))
 
-			cfg, err := ParseConfig(tmpDir.Path("skaffold.yaml"), true)
-			if cfg != nil {
-				config := cfg.(*latest.SkaffoldConfig)
-				err := defaults.Set(config)
-
+			cfgs, err := ParseConfigAndUpgrade(tmpDir.Path("skaffold.yaml"), latest.Version)
+			for _, cfg := range cfgs {
+				err := defaults.Set(cfg.(*latest.SkaffoldConfig), true)
 				t.CheckNoError(err)
 			}
 
-			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, cfg)
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expected, cfgs)
+		})
+	}
+}
+
+func TestMarshalConfig(t *testing.T) {
+	tests := []struct {
+		description string
+		config      *latest.SkaffoldConfig
+		shouldErr   bool
+	}{
+		{
+			description: "Kaniko Volume Mount - ConfigMap",
+			config: config(
+				withClusterBuild("some-secret", "/some/secret", "default", "", "20m",
+					withGitTagger(),
+					withKanikoArtifact(),
+					withKanikoVolumeMount("docker-config", "/kaniko/.docker"),
+					withVolume(v1.Volume{
+						Name: "docker-config",
+						VolumeSource: v1.VolumeSource{
+							ConfigMap: &v1.ConfigMapVolumeSource{
+								LocalObjectReference: v1.LocalObjectReference{
+									Name: "docker-config",
+								},
+							},
+						},
+					})),
+				withKubectlDeploy("k8s/*.yaml"),
+				withLogsPrefix("container"),
+			),
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
+
+			actual, err := yaml.Marshal(test.config)
+			t.CheckNoError(err)
+
+			// Unmarshal the YAML and make sure it equals the original.
+			// We can't compare the strings because the YAML serializer isn't deterministic.
+			// TestParseConfigAndUpgrade verifies that YAML -> Go works correctly.
+			// This test verifies Go -> YAML -> Go returns the original structure. Since we know
+			// YAML -> Go is working this ensures Go -> YAML is correct.
+			recovered := &latest.SkaffoldConfig{}
+
+			err = yaml.Unmarshal(actual, recovered)
+
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.config, recovered)
 		})
 	}
 }
@@ -258,9 +470,18 @@ func config(ops ...func(*latest.SkaffoldConfig)) *latest.SkaffoldConfig {
 	return cfg
 }
 
+func format(t *testutil.T, configs []string, apiVersions []string) string {
+	var str []string
+	t.CheckDeepEqual(len(configs), len(apiVersions))
+	for i := range configs {
+		str = append(str, fmt.Sprintf("apiVersion: %s\nkind: Config\n%s", apiVersions[i], configs[i]))
+	}
+	return strings.Join(str, "\n---\n")
+}
+
 func withLocalBuild(ops ...func(*latest.BuildConfig)) func(*latest.SkaffoldConfig) {
 	return func(cfg *latest.SkaffoldConfig) {
-		b := latest.BuildConfig{BuildType: latest.BuildType{LocalBuild: &latest.LocalBuild{}}}
+		b := latest.BuildConfig{BuildType: latest.BuildType{LocalBuild: &latest.LocalBuild{Concurrency: &constants.DefaultLocalConcurrency}}}
 		for _, op := range ops {
 			op(&b)
 		}
@@ -275,7 +496,8 @@ func withGoogleCloudBuild(id string, ops ...func(*latest.BuildConfig)) func(*lat
 			DockerImage: "gcr.io/cloud-builders/docker",
 			MavenImage:  "gcr.io/cloud-builders/mvn",
 			GradleImage: "gcr.io/cloud-builders/gradle",
-			KanikoImage: "gcr.io/kaniko-project/executor",
+			KanikoImage: kaniko.DefaultImage,
+			PackImage:   "gcr.io/k8s-skaffold/pack",
 		}}}
 		for _, op := range ops {
 			op(&b)
@@ -289,7 +511,7 @@ func withClusterBuild(secretName, mountPath, namespace, secret string, timeout s
 		b := latest.BuildConfig{BuildType: latest.BuildType{Cluster: &latest.ClusterDetails{
 			PullSecretName:      secretName,
 			Namespace:           namespace,
-			PullSecret:          secret,
+			PullSecretPath:      secret,
 			PullSecretMountPath: mountPath,
 			Timeout:             timeout,
 		}}}
@@ -311,12 +533,8 @@ func withDockerConfig(secretName string, path string) func(*latest.BuildConfig) 
 
 func withKubectlDeploy(manifests ...string) func(*latest.SkaffoldConfig) {
 	return func(cfg *latest.SkaffoldConfig) {
-		cfg.Deploy = latest.DeployConfig{
-			DeployType: latest.DeployType{
-				KubectlDeploy: &latest.KubectlDeploy{
-					Manifests: manifests,
-				},
-			},
+		cfg.Deploy.DeployType.KubectlDeploy = &latest.KubectlDeploy{
+			Manifests: manifests,
 		}
 	}
 }
@@ -331,11 +549,7 @@ func withKubeContext(kubeContext string) func(*latest.SkaffoldConfig) {
 
 func withHelmDeploy() func(*latest.SkaffoldConfig) {
 	return func(cfg *latest.SkaffoldConfig) {
-		cfg.Deploy = latest.DeployConfig{
-			DeployType: latest.DeployType{
-				HelmDeploy: &latest.HelmDeploy{},
-			},
-		}
+		cfg.Deploy.DeployType.HelmDeploy = &latest.HelmDeploy{}
 	}
 }
 
@@ -353,42 +567,57 @@ func withDockerArtifact(image, workspace, dockerfile string) func(*latest.BuildC
 	}
 }
 
-func withBazelArtifact(image, workspace, target string) func(*latest.BuildConfig) {
+func withBazelArtifact() func(*latest.BuildConfig) {
 	return func(cfg *latest.BuildConfig) {
 		cfg.Artifacts = append(cfg.Artifacts, &latest.Artifact{
-			ImageName: image,
-			Workspace: workspace,
+			ImageName: "image2",
+			Workspace: "./examples/app2",
 			ArtifactType: latest.ArtifactType{
 				BazelArtifact: &latest.BazelArtifact{
-					BuildTarget: target,
+					BuildTarget: "//:example.tar",
 				},
 			},
 		})
 	}
 }
 
-func withKanikoArtifact(image, workspace, dockerfile, bucket string) func(*latest.BuildConfig) {
+func withKanikoArtifact() func(*latest.BuildConfig) {
 	return func(cfg *latest.BuildConfig) {
-		bc := &latest.KanikoBuildContext{}
-		if bucket == "" {
-			bc.LocalDir = &latest.LocalDir{
-				InitImage: constants.DefaultBusyboxImage,
-			}
-		} else {
-			bc.GCSBucket = bucket
-		}
-
 		cfg.Artifacts = append(cfg.Artifacts, &latest.Artifact{
-			ImageName: image,
-			Workspace: workspace,
+			ImageName: "image1",
+			Workspace: "./examples/app1",
 			ArtifactType: latest.ArtifactType{
 				KanikoArtifact: &latest.KanikoArtifact{
-					DockerfilePath: dockerfile,
-					BuildContext:   bc,
-					Image:          constants.DefaultKanikoImage,
+					DockerfilePath: "Dockerfile",
+					InitImage:      constants.DefaultBusyboxImage,
+					Image:          kaniko.DefaultImage,
 				},
 			},
 		})
+	}
+}
+
+// withKanikoVolumeMount appends a volume mount to the latest Kaniko artifact
+func withKanikoVolumeMount(name, mountPath string) func(*latest.BuildConfig) {
+	return func(cfg *latest.BuildConfig) {
+		if cfg.Artifacts[len(cfg.Artifacts)-1].KanikoArtifact.VolumeMounts == nil {
+			cfg.Artifacts[len(cfg.Artifacts)-1].KanikoArtifact.VolumeMounts = []v1.VolumeMount{}
+		}
+
+		cfg.Artifacts[len(cfg.Artifacts)-1].KanikoArtifact.VolumeMounts = append(
+			cfg.Artifacts[len(cfg.Artifacts)-1].KanikoArtifact.VolumeMounts,
+			v1.VolumeMount{
+				Name:      name,
+				MountPath: mountPath,
+			},
+		)
+	}
+}
+
+// withVolume appends a volume to the cluster
+func withVolume(v v1.Volume) func(*latest.BuildConfig) {
+	return func(cfg *latest.BuildConfig) {
+		cfg.Cluster.Volumes = append(cfg.Cluster.Volumes, v)
 	}
 }
 
@@ -428,6 +657,12 @@ func withStatusCheckDeadline(deadline int) func(*latest.SkaffoldConfig) {
 	}
 }
 
+func withLogsPrefix(prefix string) func(*latest.SkaffoldConfig) {
+	return func(cfg *latest.SkaffoldConfig) {
+		cfg.Deploy.Logs.Prefix = prefix
+	}
+}
+
 func TestUpgradeToNextVersion(t *testing.T) {
 	for i, schemaVersion := range SchemaVersions[0 : len(SchemaVersions)-2] {
 		from := schemaVersion
@@ -451,4 +686,28 @@ func TestCantUpgradeFromLatestVersion(t *testing.T) {
 
 	_, err := factory().Upgrade()
 	testutil.CheckError(t, true, err)
+}
+
+func TestParseConfigAndUpgradeToUnknownVersion(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.NewTempDir().
+			Write("skaffold.yaml", fmt.Sprintf("apiVersion: %s\nkind: Config\n%s", latest.Version, minimalConfig)).
+			Chdir()
+
+		_, err := ParseConfigAndUpgrade("skaffold.yaml", "unknown")
+
+		t.CheckErrorContains(`unknown api version: "unknown"`, err)
+	})
+}
+
+func TestParseConfigAndUpgradeToOlderVersion(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		t.NewTempDir().
+			Write("skaffold.yaml", fmt.Sprintf("apiVersion: %s\nkind: Config\n%s", latest.Version, minimalConfig)).
+			Chdir()
+
+		_, err := ParseConfigAndUpgrade("skaffold.yaml", "skaffold/v1alpha1")
+
+		t.CheckErrorContains(`is more recent than target version "skaffold/v1alpha1": upgrade Skaffold`, err)
+	})
 }

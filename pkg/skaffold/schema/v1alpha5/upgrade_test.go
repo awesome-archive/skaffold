@@ -19,9 +19,8 @@ package v1alpha5
 import (
 	"testing"
 
-	yaml "gopkg.in/yaml.v2"
-
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/v1beta1"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
@@ -37,7 +36,7 @@ deploy:
     manifests:
       - k8s-*
 `
-	upgradeShouldFailt(t, yaml)
+	upgradeShouldFail(t, yaml)
 }
 
 func TestUpgrade_removeACRInProfiles(t *testing.T) {
@@ -55,7 +54,7 @@ profiles:
    build: 
     acr: {}
 `
-	upgradeShouldFailt(t, yaml)
+	upgradeShouldFail(t, yaml)
 }
 
 func TestUpgrade(t *testing.T) {
@@ -116,7 +115,7 @@ profiles:
 	verifyUpgrade(t, yaml, expected)
 }
 
-func upgradeShouldFailt(t *testing.T, input string) {
+func upgradeShouldFail(t *testing.T, input string) {
 	config := NewSkaffoldConfig()
 	err := yaml.UnmarshalStrict([]byte(input), config)
 	testutil.CheckErrorAndDeepEqual(t, false, err, Version, config.GetVersion())

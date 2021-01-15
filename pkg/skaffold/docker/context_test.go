@@ -46,7 +46,7 @@ func TestDockerContext(t *testing.T) {
 
 			reader, writer := io.Pipe()
 			go func() {
-				err := CreateDockerTarContext(context.Background(), writer, dir, artifact, nil)
+				err := CreateDockerTarContext(context.Background(), writer, NewBuildConfig(dir, "test", artifact.DockerfilePath, artifact.BuildArgs), nil)
 				if err != nil {
 					writer.CloseWithError(err)
 				} else {
@@ -66,11 +66,11 @@ func TestDockerContext(t *testing.T) {
 				files[header.Name] = true
 			}
 
-			t.CheckDeepEqual(false, files["ignored.txt"])
-			t.CheckDeepEqual(false, files["alsoignored.txt"])
-			t.CheckDeepEqual(false, files["files/ignored.txt"])
-			t.CheckDeepEqual(true, files["files/included.txt"])
-			t.CheckDeepEqual(true, files["Dockerfile"])
+			t.CheckFalse(files["ignored.txt"])
+			t.CheckFalse(files["alsoignored.txt"])
+			t.CheckFalse(files["files/ignored.txt"])
+			t.CheckTrue(files["files/included.txt"])
+			t.CheckTrue(files["Dockerfile"])
 		})
 	}
 }

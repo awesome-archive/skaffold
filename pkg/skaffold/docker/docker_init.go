@@ -25,67 +25,69 @@ import (
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 	"github.com/sirupsen/logrus"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 )
 
 // For testing
 var (
-	ValidateDockerfileFunc = ValidateDockerfile
+	Validate = validate
 )
 
 // Name is the name of the Docker builder
 var Name = "Docker"
 
-// Docker is the path to a dockerfile. Implements the InitBuilder interface.
-type Docker struct {
+// ArtifactConfig holds information about a Docker build based project
+type ArtifactConfig struct {
 	File string `json:"path"`
 }
 
 // Name returns the name of the builder, "Docker"
-func (d Docker) Name() string {
+func (c ArtifactConfig) Name() string {
 	return Name
 }
 
 // Describe returns the initBuilder's string representation, used when prompting the user to choose a builder.
-func (d Docker) Describe() string {
-	return fmt.Sprintf("%s (%s)", d.Name(), d.File)
+func (c ArtifactConfig) Describe() string {
+	return fmt.Sprintf("%s (%s)", c.Name(), c.File)
 }
 
-// CreateArtifact creates an Artifact to be included in the generated Build Config
-func (d Docker) CreateArtifact(manifestImage string) *latest.Artifact {
-	workspace := filepath.Dir(d.File)
-	a := &latest.Artifact{ImageName: manifestImage}
-	if workspace != "." {
-		a.Workspace = workspace
-	}
-	if filepath.Base(d.File) != constants.DefaultDockerfilePath {
-		a.ArtifactType = latest.ArtifactType{
-			DockerArtifact: &latest.DockerArtifact{DockerfilePath: d.File},
+// ArtifactType returns the type of the artifact to be built.
+func (c ArtifactConfig) ArtifactType(workspace string) latest.ArtifactType {
+	dockerfile := filepath.Base(c.File)
+	if workspace != "" {
+		// attempt to relativize the path
+		if rel, err := filepath.Rel(workspace, c.File); err == nil {
+			dockerfile = rel
 		}
 	}
 
-	return a
+	return latest.ArtifactType{
+		DockerArtifact: &latest.DockerArtifact{
+			// to make skaffold.yaml more portable across OS-es we should always generate /-delimited filePaths
+			DockerfilePath: filepath.ToSlash(dockerfile),
+		},
+	}
 }
 
 // ConfiguredImage returns the target image configured by the builder, or an empty string if no image is configured
-func (d Docker) ConfiguredImage() string {
+func (c ArtifactConfig) ConfiguredImage() string {
 	// Target image is not configured in dockerfiles
 	return ""
 }
 
 // Path returns the path to the dockerfile
-func (d Docker) Path() string {
-	return d.File
+func (c ArtifactConfig) Path() string {
+	return c.File
 }
 
-// ValidateDockerfile makes sure the given Dockerfile is existing and valid.
-func ValidateDockerfile(path string) bool {
+// validateConfig makes sure the given Dockerfile is existing and valid.
+func validate(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		logrus.Warnf("opening file %s: %s", path, err.Error())
 		return false
 	}
+	defer f.Close()
 
 	res, err := parser.Parse(f)
 	if err != nil || res == nil || len(res.AST.Children) == 0 {

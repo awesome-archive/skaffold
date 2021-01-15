@@ -14,11 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if [[ "${TRAVIS}" == "true" ]] && [[ "${TRAVIS_OS_NAME}" != "linux" ]]; then
-    printf "On Travis CI, we only test proto generation on Linux\n"
-    exit 0
-fi
-
 docker build -t gen-proto -f hack/proto/Dockerfile --target compare proto
 if [ $? -ne 0 ]; then
    docker run --rm gen-proto
@@ -26,7 +21,7 @@ if [ $? -ne 0 ]; then
    exit 1
 fi
 
-temp_file=$(mktemp)
+temp_file=$(mktemp ${TMPDIR:-/tmp}/test-generated-proto.XXXXXX)
 trap 'rm -f -- "$temp_file"' INT TERM HUP EXIT
 docker run --rm gen-proto cat index.md > "$temp_file"
 cmp "$temp_file" docs/content/en/docs/references/api/grpc.md

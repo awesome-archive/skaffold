@@ -17,26 +17,24 @@ limitations under the License.
 package integration
 
 import (
+	"io/ioutil"
 	"strings"
 	"testing"
 
 	"github.com/GoogleContainerTools/skaffold/integration/skaffold"
+	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
 func TestRun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
 	tests := []struct {
 		description string
 		dir         string
-		filename    string
 		args        []string
 		deployments []string
 		pods        []string
 		env         []string
-		gcpOnly     bool
 	}{
 		{
 			description: "getting-started",
@@ -72,86 +70,14 @@ func TestRun(t *testing.T) {
 			pods:        []string{"bazel"},
 		},
 		{
-			description: "Google Cloud Build",
-			dir:         "examples/google-cloud-build",
-			pods:        []string{"getting-started"},
-			gcpOnly:     true,
-		},
-		{
-			description: "Google Cloud Build with sub folder",
-			dir:         "testdata/gcb-sub-folder",
-			pods:        []string{"getting-started"},
-			gcpOnly:     true,
-		},
-		{
-			description: "Google Cloud Build with Kaniko",
-			dir:         "examples/gcb-kaniko",
-			pods:        []string{"getting-started-kaniko"},
-			gcpOnly:     true,
-		},
-		{
-			description: "kaniko",
-			dir:         "examples/kaniko",
-			pods:        []string{"getting-started-kaniko"},
-			gcpOnly:     true,
-		},
-		{
-			description: "kaniko local",
-			dir:         "examples/kaniko-local",
-			pods:        []string{"getting-started-kaniko"},
-			gcpOnly:     true,
-		},
-		{
-			description: "kaniko local with target",
-			dir:         "testdata/kaniko-target",
-			pods:        []string{"getting-started-kaniko"},
-			gcpOnly:     true,
-		},
-		{
-			description: "kaniko local with sub folder",
-			dir:         "testdata/kaniko-sub-folder",
-			pods:        []string{"getting-started-kaniko"},
-			gcpOnly:     true,
-		},
-		{
-			description: "kaniko microservices",
-			dir:         "testdata/kaniko-microservices",
-			deployments: []string{"leeroy-app", "leeroy-web"},
-			gcpOnly:     true,
-		},
-		{
 			description: "jib",
 			dir:         "testdata/jib",
 			deployments: []string{"web"},
 		},
 		{
-			description: "jib in googlecloudbuild",
-			dir:         "testdata/jib",
-			args:        []string{"-p", "gcb"},
-			deployments: []string{"web"},
-			gcpOnly:     true,
-		},
-		{
 			description: "jib gradle",
-			dir:         "testdata/jib-gradle",
+			dir:         "examples/jib-gradle",
 			deployments: []string{"web"},
-		},
-		{
-			description: "jib gradle in googlecloudbuild",
-			dir:         "testdata/jib-gradle",
-			args:        []string{"-p", "gcb"},
-			deployments: []string{"web"},
-			gcpOnly:     true,
-		}, {
-			description: "buildpacks",
-			dir:         "examples/buildpacks",
-			deployments: []string{"web"},
-			// Don't run on kind because of this issue: https://github.com/buildpack/pack/issues/277
-			gcpOnly: true,
-		}, {
-			description: "custom builder",
-			dir:         "testdata/custom",
-			pods:        []string{"bazel"},
 		},
 		{
 			description: "profiles",
@@ -159,39 +85,166 @@ func TestRun(t *testing.T) {
 			args:        []string{"-p", "minikube-profile"},
 			pods:        []string{"hello-service"},
 		},
+		{
+			description: "multiple deployers",
+			dir:         "testdata/deploy-multiple",
+			pods:        []string{"deploy-kubectl", "deploy-kustomize"},
+		},
+		{
+			description: "custom builder",
+			dir:         "examples/custom",
+			pods:        []string{"getting-started"},
+		},
+		{
+			description: "buildpacks Go",
+			dir:         "examples/buildpacks",
+			deployments: []string{"web"},
+		},
+		{
+			description: "buildpacks NodeJS",
+			dir:         "examples/buildpacks-node",
+			deployments: []string{"web"},
+		},
+		{
+			description: "buildpacks Python",
+			dir:         "examples/buildpacks-python",
+			deployments: []string{"web"},
+		},
+		{
+			description: "buildpacks Java",
+			dir:         "examples/buildpacks-java",
+			deployments: []string{"web"},
+		},
+		{
+			description: "kustomize",
+			dir:         "examples/getting-started-kustomize",
+			deployments: []string{"skaffold-kustomize-dev"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			if test.gcpOnly && !ShouldRunGCPOnlyTests() {
-				t.Skip("skipping gcp only test")
-			}
-			if !test.gcpOnly && ShouldRunGCPOnlyTests() {
-				t.Skip("skipping test that is not gcp only")
-			}
+			ns, client := SetupNamespace(t)
 
-			ns, client, deleteNs := SetupNamespace(t)
-			defer deleteNs()
-
-			skaffold.Run(test.args...).WithConfig(test.filename).InDir(test.dir).InNs(ns.Name).WithEnv(test.env).RunOrFail(t)
+			skaffold.Run(test.args...).InDir(test.dir).InNs(ns.Name).WithEnv(test.env).RunOrFail(t)
 
 			client.WaitForPodsReady(test.pods...)
 			client.WaitForDeploymentsToStabilize(test.deployments...)
 
-			skaffold.Delete().WithConfig(test.filename).InDir(test.dir).InNs(ns.Name).WithEnv(test.env).RunOrFail(t)
+			skaffold.Delete().InDir(test.dir).InNs(ns.Name).WithEnv(test.env).RunOrFail(t)
+		})
+	}
+}
+
+func TestRunRenderOnly(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+
+	testutil.Run(t, "write rendered manifest to provided filepath", func(tu *testutil.T) {
+		tmpDir := tu.NewTempDir()
+		renderPath := tmpDir.Path("output.yaml")
+
+		test := struct {
+			description string
+			renderPath  string
+			args        []string
+			dir         string
+			pods        []string
+		}{
+			args: []string{"--render-only", "--render-output", renderPath},
+			dir:  "examples/getting-started",
+			pods: []string{"getting-started"},
+		}
+
+		skaffold.Run(test.args...).InDir(test.dir).RunOrFail(t)
+
+		dat, err := ioutil.ReadFile(renderPath)
+		tu.CheckNoError(err)
+
+		tu.CheckMatches("name: getting-started", string(dat))
+	})
+}
+
+func TestRunGCPOnly(t *testing.T) {
+	MarkIntegrationTest(t, NeedsGcp)
+
+	tests := []struct {
+		description string
+		dir         string
+		args        []string
+		deployments []string
+		pods        []string
+	}{
+		{
+			description: "Google Cloud Build",
+			dir:         "examples/google-cloud-build",
+			pods:        []string{"getting-started"},
+		},
+		{
+			description: "Google Cloud Build with sub folder",
+			dir:         "testdata/gcb-sub-folder",
+			pods:        []string{"getting-started"},
+		},
+		{
+			description: "Google Cloud Build with Kaniko",
+			dir:         "examples/gcb-kaniko",
+			pods:        []string{"getting-started-kaniko"},
+		},
+		{
+			description: "kaniko",
+			dir:         "examples/kaniko",
+			pods:        []string{"getting-started-kaniko"},
+		},
+		{
+			description: "kaniko with target",
+			dir:         "testdata/kaniko-target",
+			pods:        []string{"getting-started-kaniko"},
+		},
+		{
+			description: "kaniko with sub folder",
+			dir:         "testdata/kaniko-sub-folder",
+			pods:        []string{"getting-started-kaniko"},
+		},
+		{
+			description: "kaniko microservices",
+			dir:         "testdata/kaniko-microservices",
+			deployments: []string{"leeroy-app", "leeroy-web"},
+		},
+		{
+			description: "jib in googlecloudbuild",
+			dir:         "testdata/jib",
+			args:        []string{"-p", "gcb"},
+			deployments: []string{"web"},
+		},
+		{
+			description: "jib gradle in googlecloudbuild",
+			dir:         "examples/jib-gradle",
+			args:        []string{"-p", "gcb"},
+			deployments: []string{"web"},
+		},
+		{
+			description: "buildpacks on Cloud Build",
+			dir:         "examples/buildpacks",
+			args:        []string{"-p", "gcb"},
+			deployments: []string{"web"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			ns, client := SetupNamespace(t)
+
+			skaffold.Run(test.args...).InDir(test.dir).InNs(ns.Name).RunOrFail(t)
+
+			client.WaitForPodsReady(test.pods...)
+			client.WaitForDeploymentsToStabilize(test.deployments...)
+
+			skaffold.Delete().InDir(test.dir).InNs(ns.Name).RunOrFail(t)
 		})
 	}
 }
 
 func TestRunIdempotent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-	if ShouldRunGCPOnlyTests() {
-		t.Skip("skipping test that is not gcp only")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
-	ns, _, deleteNs := SetupNamespace(t)
-	defer deleteNs()
+	ns, _ := SetupNamespace(t)
 
 	// The first `skaffold run` creates resources (deployment.apps/leeroy-web, service/leeroy-app, deployment.apps/leeroy-app)
 	out := skaffold.Run("-l", "skaffold.dev/run-id=notunique").InDir("examples/microservices").InNs(ns.Name).RunOrFailOutput(t)
@@ -214,17 +267,11 @@ func TestRunIdempotent(t *testing.T) {
 }
 
 func TestRunUnstableChecked(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-	if ShouldRunGCPOnlyTests() {
-		t.Skip("skipping test that is not gcp only")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
-	ns, _, deleteNs := SetupNamespace(t)
-	defer deleteNs()
+	ns, _ := SetupNamespace(t)
 
-	output, err := skaffold.Run("--status-check=true").InDir("testdata/unstable-deployment").InNs(ns.Name).RunWithCombinedOutput(t)
+	output, err := skaffold.Run().InDir("testdata/unstable-deployment").InNs(ns.Name).RunWithCombinedOutput(t)
 	if err == nil {
 		t.Errorf("expected to see an error since the deployment is not stable: %s", output)
 	} else if !strings.Contains(string(output), "unstable-deployment failed") {
@@ -233,15 +280,37 @@ func TestRunUnstableChecked(t *testing.T) {
 }
 
 func TestRunUnstableNotChecked(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-	if ShouldRunGCPOnlyTests() {
-		t.Skip("skipping test that is not gcp only")
-	}
+	MarkIntegrationTest(t, CanRunWithoutGcp)
 
-	ns, _, deleteNs := SetupNamespace(t)
-	defer deleteNs()
+	ns, _ := SetupNamespace(t)
 
-	skaffold.Run().InDir("testdata/unstable-deployment").InNs(ns.Name).RunOrFail(t)
+	skaffold.Run("--status-check=false").InDir("testdata/unstable-deployment").InNs(ns.Name).RunOrFail(t)
+}
+
+func TestRunTailPod(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+
+	ns, _ := SetupNamespace(t)
+
+	out := skaffold.Run("--tail", "-p", "pod").InDir("testdata/hello").InNs(ns.Name).RunLive(t)
+
+	WaitForLogs(t, out,
+		"Hello world! 0",
+		"Hello world! 1",
+		"Hello world! 2",
+	)
+}
+
+func TestRunTailDeployment(t *testing.T) {
+	MarkIntegrationTest(t, CanRunWithoutGcp)
+
+	ns, _ := SetupNamespace(t)
+
+	out := skaffold.Run("--tail", "-p", "deployment").InDir("testdata/hello").InNs(ns.Name).RunLive(t)
+
+	WaitForLogs(t, out,
+		"Hello world! 0",
+		"Hello world! 1",
+		"Hello world! 2",
+	)
 }

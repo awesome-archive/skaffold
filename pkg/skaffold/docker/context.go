@@ -18,28 +18,26 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path/filepath"
 
-	"github.com/pkg/errors"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
-func CreateDockerTarContext(ctx context.Context, w io.Writer, workspace string, a *latest.DockerArtifact, insecureRegistries map[string]bool) error {
-	paths, err := GetDependencies(ctx, workspace, a.DockerfilePath, a.BuildArgs, insecureRegistries)
+func CreateDockerTarContext(ctx context.Context, w io.Writer, buildCfg BuildConfig, cfg Config) error {
+	paths, err := GetDependenciesCached(ctx, buildCfg, cfg)
 	if err != nil {
-		return errors.Wrap(err, "getting relative tar paths")
+		return fmt.Errorf("getting relative tar paths: %w", err)
 	}
 
 	var p []string
 	for _, path := range paths {
-		p = append(p, filepath.Join(workspace, path))
+		p = append(p, filepath.Join(buildCfg.workspace, path))
 	}
 
-	if err := util.CreateTar(w, workspace, p); err != nil {
-		return errors.Wrap(err, "creating tar gz")
+	if err := util.CreateTar(w, buildCfg.workspace, p); err != nil {
+		return fmt.Errorf("creating tar gz: %w", err)
 	}
 
 	return nil

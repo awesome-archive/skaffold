@@ -17,13 +17,16 @@ limitations under the License.
 package gcb
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/pkg/errors"
 	cloudbuild "google.golang.org/api/cloudbuild/v1"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/jib"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/jib"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
 func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuild.Build, error) {
@@ -38,7 +41,7 @@ func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuil
 			Steps: []*cloudbuild.BuildStep{{
 				Name:       b.MavenImage,
 				Entrypoint: "sh",
-				Args:       fixHome("mvn", jib.GenerateMavenArgs("build", tag, artifact.JibArtifact, b.skipTests, b.insecureRegistries)),
+				Args:       fixHome("mvn", jib.GenerateMavenBuildArgs("build", tag, artifact.JibArtifact, b.skipTests, true, artifact.Dependencies, b.artifactStore, b.cfg.GetInsecureRegistries(), false)),
 			}},
 		}, nil
 	case jib.JibGradle:
@@ -46,7 +49,7 @@ func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuil
 			Steps: []*cloudbuild.BuildStep{{
 				Name:       b.GradleImage,
 				Entrypoint: "sh",
-				Args:       fixHome("gradle", jib.GenerateGradleArgs("jib", tag, artifact.JibArtifact, b.skipTests, b.insecureRegistries)),
+				Args:       fixHome("gradle", jib.GenerateGradleBuildArgs("jib", tag, artifact.JibArtifact, b.skipTests, true, artifact.Dependencies, b.artifactStore, b.cfg.GetInsecureRegistries(), false)),
 			}},
 		}, nil
 	default:
@@ -56,4 +59,34 @@ func (b *Builder) jibBuildSpec(artifact *latest.Artifact, tag string) (cloudbuil
 
 func fixHome(command string, args []string) []string {
 	return []string{"-c", command + " -Duser.home=$$HOME " + strings.Join(args, " ")}
+}
+
+func jibAddWorkspaceToDependencies(workspace string, dependencies []string) ([]string, error) {
+	dependencyMap := make(map[string]bool)
+	for _, d := range dependencies {
+		dependencyMap[d] = true
+	}
+
+	err := filepath.Walk(workspace,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				if info.Name() == "target" {
+					if util.IsFile(filepath.Join(filepath.Dir(path), "pom.xml")) {
+						return filepath.SkipDir
+					}
+				} else if info.Name() == "build" {
+					if util.IsFile(filepath.Join(filepath.Dir(path), "build.gradle")) {
+						return filepath.SkipDir
+					}
+				}
+			}
+			if _, ok := dependencyMap[path]; !ok {
+				dependencies = append(dependencies, path)
+			}
+			return nil
+		})
+	return dependencies, err
 }

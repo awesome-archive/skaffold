@@ -18,46 +18,62 @@ package local
 
 import (
 	"context"
-	"fmt"
 	"io"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/bazel"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/buildpacks"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/custom"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build/tag"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/jib"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
 // Build runs a docker build on the host and tags the resulting image with
 // its checksum. It streams build progress to the writer argument.
-func (b *Builder) Build(ctx context.Context, out io.Writer, tags tag.ImageTags, artifacts []*latest.Artifact) ([]build.Artifact, error) {
+func (b *Builder) Build(ctx context.Context, out io.Writer, a *latest.Artifact) build.ArtifactBuilder {
+	if b.prune {
+		b.localPruner.asynchronousCleanupOldImages(ctx, []string{a.ImageName})
+	}
+	builder := build.WithLogFile(b.buildArtifact, b.muted)
+	return builder
+}
+
+func (b *Builder) PreBuild(_ context.Context, out io.Writer) error {
 	if b.localCluster {
 		color.Default.Fprintf(out, "Found [%s] context, using local docker daemon.\n", b.kubeContext)
 	}
-	defer b.localDocker.Close()
-
-	// TODO(dgageot): parallel builds
-	return build.InSequence(ctx, out, tags, artifacts, b.buildArtifact)
+	return nil
 }
 
-func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	digestOrImageID, err := b.runBuildForArtifact(ctx, out, artifact, tag)
+func (b *Builder) PostBuild(ctx context.Context, _ io.Writer) error {
+	defer b.localDocker.Close()
+	if b.prune {
+		if b.mode == config.RunModes.Build {
+			b.localPruner.synchronousCleanupOldImages(ctx, b.builtImages)
+		} else {
+			b.localPruner.asynchronousCleanupOldImages(ctx, b.builtImages)
+		}
+	}
+	return nil
+}
+
+func (b *Builder) Concurrency() int {
+	if b.local.Concurrency == nil {
+		return 0
+	}
+	return *b.local.Concurrency
+}
+
+func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) (string, error) {
+	digestOrImageID, err := b.runBuildForArtifact(ctx, out, a, tag)
 	if err != nil {
-		return "", errors.Wrap(err, "build artifact")
+		return "", err
 	}
 
 	if b.pushImages {
 		// only track images for pruning when building with docker
 		// if we're pushing a bazel image, it was built directly to the registry
-		if artifact.DockerArtifact != nil {
+		if a.DockerArtifact != nil {
 			imageID, err := b.getImageIDForTag(ctx, tag)
 			if err != nil {
 				logrus.Warnf("unable to inspect image: built images may not be cleaned up correctly by skaffold")
@@ -66,98 +82,42 @@ func (b *Builder) buildArtifact(ctx context.Context, out io.Writer, artifact *la
 				b.builtImages = append(b.builtImages, imageID)
 			}
 		}
+
 		digest := digestOrImageID
-		return tag + "@" + digest, nil
+		return build.TagWithDigest(tag, digest), nil
 	}
 
 	imageID := digestOrImageID
 	b.builtImages = append(b.builtImages, imageID)
-	return b.localDocker.TagWithImageID(ctx, tag, imageID)
+	return build.TagWithImageID(ctx, tag, imageID, b.localDocker)
 }
 
-func (b *Builder) runBuildForArtifact(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	switch {
-	case artifact.DockerArtifact != nil:
-		return b.buildDocker(ctx, out, artifact, tag)
-
-	case artifact.BazelArtifact != nil:
-		return b.buildBazel(ctx, out, artifact, tag)
-
-	case artifact.JibArtifact != nil:
-		return b.buildJib(ctx, out, artifact, tag)
-
-	case artifact.CustomArtifact != nil:
-		return b.buildCustom(ctx, out, artifact, tag)
-
-	case artifact.BuildpackArtifact != nil:
-		return b.buildBuildpack(ctx, out, artifact, tag)
-
-	default:
-		return "", fmt.Errorf("undefined artifact type: %+v", artifact.ArtifactType)
+func (b *Builder) runBuildForArtifact(ctx context.Context, out io.Writer, a *latest.Artifact, tag string) (string, error) {
+	if !b.pushImages {
+		// All of the builders will rely on a local Docker:
+		// + Either to build the image,
+		// + Or to docker load it.
+		// Let's fail fast if Docker is not available
+		if _, err := b.localDocker.ServerVersion(ctx); err != nil {
+			return "", err
+		}
 	}
-}
 
-func (b *Builder) buildJib(ctx context.Context, out io.Writer, artifact *latest.Artifact, tag string) (string, error) {
-	t, err := jib.DeterminePluginType(artifact.Workspace, artifact.JibArtifact)
+	builder, err := newPerArtifactBuilder(b, a)
 	if err != nil {
 		return "", err
 	}
-
-	switch t {
-	case jib.JibMaven:
-		return b.buildJibMaven(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
-	case jib.JibGradle:
-		return b.buildJibGradle(ctx, out, artifact.Workspace, artifact.JibArtifact, tag)
-	default:
-		return "", errors.Errorf("Unable to determine Jib builder type for %s", artifact.Workspace)
-	}
-}
-
-func (b *Builder) DependenciesForArtifact(ctx context.Context, a *latest.Artifact) ([]string, error) {
-	var (
-		paths []string
-		err   error
-	)
-
-	switch {
-	case a.DockerArtifact != nil:
-		paths, err = docker.GetDependencies(ctx, a.Workspace, a.DockerArtifact.DockerfilePath, a.DockerArtifact.BuildArgs, b.insecureRegistries)
-
-	case a.BazelArtifact != nil:
-		paths, err = bazel.GetDependencies(ctx, a.Workspace, a.BazelArtifact)
-
-	case a.JibArtifact != nil:
-		paths, err = jib.GetDependencies(ctx, a.Workspace, a.JibArtifact)
-
-	case a.CustomArtifact != nil:
-		paths, err = custom.GetDependencies(ctx, a.Workspace, a.CustomArtifact, b.insecureRegistries)
-
-	case a.BuildpackArtifact != nil:
-		paths, err = buildpacks.GetDependencies(ctx, a.Workspace, a.BuildpackArtifact)
-
-	default:
-		return nil, fmt.Errorf("undefined artifact type: %+v", a.ArtifactType)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return util.AbsolutePaths(a.Workspace, paths), nil
+	return builder.Build(ctx, out, a, tag)
 }
 
 func (b *Builder) getImageIDForTag(ctx context.Context, tag string) (string, error) {
 	insp, _, err := b.localDocker.ImageInspectWithRaw(ctx, tag)
 	if err != nil {
-		return "", errors.Wrap(err, "inspecting image")
+		return "", err
 	}
 	return insp.ID, nil
 }
 
-func (b *Builder) SyncMap(ctx context.Context, a *latest.Artifact) (map[string][]string, error) {
-	if a.DockerArtifact == nil {
-		return nil, build.ErrSyncMapNotSupported{}
-	}
-
-	return docker.SyncMap(ctx, a.Workspace, a.DockerArtifact.DockerfilePath, a.DockerArtifact.BuildArgs, b.insecureRegistries)
+func (b *Builder) retrieveExtraEnv() []string {
+	return b.localDocker.ExtraEnv()
 }

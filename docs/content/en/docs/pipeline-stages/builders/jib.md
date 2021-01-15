@@ -45,6 +45,12 @@ based on the presence of standard build files in the `artifact`'s
     or the Gradle wrapper script (`gradlew`, `gradlew.bat`, or
     `gradlew.cmd`).
 
+**Artifact Dependency**
+
+You can define dependency on other artifacts using the `requires` keyword. This can be useful to specify another artifact image as the `fromImage`.
+
+{{% readfile file="samples/builders/artifact-dependencies/jib-local.yaml" %}}
+
 **Example**
 
 See the [Skaffold-Jib demo project](https://github.com/GoogleContainerTools/skaffold/blob/master/examples/jib/)
@@ -84,11 +90,15 @@ a container image.  Then for each such sub-project:
 
 
 ## Remotely with Google Cloud Build
+
 Skaffold can build artifacts using Jib remotely on [Google Cloud Build]({{<relref "/docs/pipeline-stages/builders#remotely-on-google-cloud-build">}}).
 
 **Configuration**
 
-To configure, add `googleCloudBuild` to  `build` section to `skaffold.yaml`
+To configure, add `googleCloudBuild` to `build` section to `skaffold.yaml`.
+The following options can optionally be configured:
+
+{{< schema root="GoogleCloudBuild" >}}
 
 **Example**
 

@@ -1,18 +1,26 @@
-apiVersion: skaffold/v1
+apiVersion: skaffold/v2beta11
 kind: Config
 build:
   artifacts:
-    - image: gcr.io/k8s-skaffold/leeroy-web
+    - image: leeroy-web
       context: ./leeroy-web/
       kaniko:
         cache: {}
-    - image: gcr.io/k8s-skaffold/leeroy-app
+      requires:
+      - image: base
+        alias: BASE
+    - image: leeroy-app
       context: ./leeroy-app/
       kaniko:
-        buildContext:
-          localDir: {}
         cache: {}
         target: target_stage
+      requires:
+      - image: base
+        alias: BASE
+    - image: base
+      context: ./base/
+      kaniko:
+        cache: {}
   cluster:
     pullSecretName: e2esecret
 deploy:

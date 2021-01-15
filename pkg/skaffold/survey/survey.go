@@ -17,28 +17,67 @@ limitations under the License.
 package survey
 
 import (
+	"context"
+	"fmt"
 	"io"
-	"os"
+
+	"github.com/pkg/browser"
+	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/color"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 )
 
 const (
-	Prompt = `Help improve Skaffold! Take a 10 seconds anonymous survey by running
-   $skaffold survey`
+	Prompt = `Help improve Skaffold with our 2-minute anonymous survey: run 'skaffold survey'
+`
+
+	URL = "https://forms.gle/BMTbGQXLWSdn7vEs6"
 )
 
-// for testing
 var (
-	isStdOut = stdOut
+	Form = fmt.Sprintf(`Thank you for offering your feedback on Skaffold! Understanding your experiences and opinions helps us make Skaffold better for you and other users.
+
+Skaffold will now attempt to open the survey in your default web browser. You may also manually open it using this link:
+
+%s
+
+Tip: To permanently disable the survey prompt, run:
+   skaffold config set --survey --global disable-prompt true`, URL)
+
+	// for testing
+	isStdOut     = color.IsStdout
+	open         = browser.OpenURL
+	updateConfig = config.UpdateGlobalSurveyPrompted
 )
 
-func DisplaySurveyForm(out io.Writer) {
-	if isStdOut(out) {
-		color.Default.Fprintln(out, Prompt)
+type Runner struct {
+	configFile string
+}
+
+func New(configFile string) *Runner {
+	return &Runner{
+		configFile: configFile,
 	}
 }
 
-func stdOut(out io.Writer) bool {
-	return out == os.Stdout
+func (s *Runner) DisplaySurveyPrompt(out io.Writer) error {
+	if isStdOut(out) {
+		color.Green.Fprintf(out, Prompt)
+	}
+	return updateConfig(s.configFile)
+}
+
+func (s *Runner) OpenSurveyForm(_ context.Context, out io.Writer) error {
+	_, err := fmt.Fprintln(out, Form)
+	if err != nil {
+		return err
+	}
+	if err := open(URL); err != nil {
+		logrus.Debugf("could not open url %s", URL)
+		return err
+	}
+	// Currently we will only update the global survey taken
+	// When prompting for the survey, we need to use the same field.
+	return config.UpdateGlobalSurveyTaken(s.configFile)
 }

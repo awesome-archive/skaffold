@@ -19,43 +19,42 @@ package runner
 import "sync"
 
 type intents struct {
-	build  bool
-	sync   bool
-	deploy bool
-
-	resetBuild  func()
-	resetSync   func()
-	resetDeploy func()
+	build      bool
+	sync       bool
+	deploy     bool
+	autoBuild  bool
+	autoSync   bool
+	autoDeploy bool
 
 	lock sync.Mutex
 }
 
 func newIntents(autoBuild, autoSync, autoDeploy bool) *intents {
 	i := &intents{
-		resetBuild:  func() {},
-		resetSync:   func() {},
-		resetDeploy: func() {},
-	}
-
-	if !autoBuild {
-		i.resetBuild = func() {
-			i.setBuild(false)
-		}
-	}
-
-	if !autoSync {
-		i.resetSync = func() {
-			i.setSync(false)
-		}
-	}
-
-	if !autoDeploy {
-		i.resetDeploy = func() {
-			i.setDeploy(false)
-		}
+		autoBuild:  autoBuild,
+		autoSync:   autoSync,
+		autoDeploy: autoDeploy,
 	}
 
 	return i
+}
+
+func (i *intents) resetBuild() {
+	i.lock.Lock()
+	i.build = i.autoBuild
+	i.lock.Unlock()
+}
+
+func (i *intents) resetSync() {
+	i.lock.Lock()
+	i.sync = i.autoSync
+	i.lock.Unlock()
+}
+
+func (i *intents) resetDeploy() {
+	i.lock.Lock()
+	i.deploy = i.autoDeploy
+	i.lock.Unlock()
 }
 
 func (i *intents) setBuild(val bool) {
@@ -76,9 +75,51 @@ func (i *intents) setDeploy(val bool) {
 	i.lock.Unlock()
 }
 
+func (i *intents) getAutoBuild() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoBuild
+}
+
+func (i *intents) getAutoSync() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoSync
+}
+
+func (i *intents) getAutoDeploy() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoDeploy
+}
+
+func (i *intents) setAutoBuild(val bool) {
+	i.lock.Lock()
+	i.autoBuild = val
+	i.lock.Unlock()
+}
+
+func (i *intents) setAutoSync(val bool) {
+	i.lock.Lock()
+	i.autoSync = val
+	i.lock.Unlock()
+}
+
+func (i *intents) setAutoDeploy(val bool) {
+	i.lock.Lock()
+	i.autoDeploy = val
+	i.lock.Unlock()
+}
+
 // returns build, sync, and deploy intents (in that order)
 func (i *intents) GetIntents() (bool, bool, bool) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	return i.build, i.sync, i.deploy
+}
+
+func (i *intents) IsAnyAutoEnabled() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	return i.autoBuild || i.autoSync || i.autoDeploy
 }

@@ -18,39 +18,59 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
 )
 
-func RetrieveWorkingDir(tagged string, insecureRegistries map[string]bool) (string, error) {
+func RetrieveConfigFile(tagged string, cfg Config) (*v1.ConfigFile, error) {
+	if strings.ToLower(tagged) == "scratch" {
+		return nil, nil
+	}
+
 	var cf *v1.ConfigFile
 	var err error
 
-	if strings.ToLower(tagged) == "scratch" {
-		return "/", nil
-	}
-
-	// TODO: use the proper RunContext
-	localDocker, err := NewAPIClient(&runcontext.RunContext{})
+	localDocker, err := NewAPIClient(cfg)
 	if err == nil {
 		cf, err = localDocker.ConfigFile(context.Background(), tagged)
 	}
 	if err != nil {
 		// No local Docker is available
-		cf, err = RetrieveRemoteConfig(tagged, insecureRegistries)
+		cf, err = RetrieveRemoteConfig(tagged, cfg)
 	}
 	if err != nil {
-		return "", errors.Wrap(err, "retrieving image config")
+		return nil, fmt.Errorf("retrieving image config: %w", err)
 	}
 
-	if cf.Config.WorkingDir == "" {
+	return cf, err
+}
+
+func RetrieveWorkingDir(tagged string, cfg Config) (string, error) {
+	cf, err := RetrieveConfigFile(tagged, cfg)
+	switch {
+	case err != nil:
+		return "", err
+	case cf == nil:
+		return "/", nil
+	case cf.Config.WorkingDir == "":
 		logrus.Debugf("Using default workdir '/' for %s", tagged)
 		return "/", nil
+	default:
+		return cf.Config.WorkingDir, nil
 	}
-	return cf.Config.WorkingDir, nil
+}
+
+func RetrieveLabels(tagged string, cfg Config) (map[string]string, error) {
+	cf, err := RetrieveConfigFile(tagged, cfg)
+	switch {
+	case err != nil:
+		return nil, err
+	case cf == nil:
+		return nil, nil
+	default:
+		return cf.Config.Labels, nil
+	}
 }

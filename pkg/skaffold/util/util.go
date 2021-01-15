@@ -22,17 +22,16 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	yaml "gopkg.in/yaml.v2"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/walk"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
 )
 
 const (
@@ -46,21 +45,6 @@ func RandomID() string {
 		panic(err)
 	}
 	return fmt.Sprintf("%x", b)
-}
-
-// These are the supported file formats for Kubernetes manifests
-var validSuffixes = []string{".yml", ".yaml", ".json"}
-
-// IsSupportedKubernetesFormat is for determining if a file under a glob pattern
-// is deployable file format. It makes no attempt to check whether or not the file
-// is actually deployable or has the correct contents.
-func IsSupportedKubernetesFormat(n string) bool {
-	for _, s := range validSuffixes {
-		if strings.HasSuffix(n, s) {
-			return true
-		}
-	}
-	return false
 }
 
 func StrSliceContains(sl []string, s string) bool {
@@ -128,29 +112,18 @@ func ExpandPathsGlob(workingDir string, paths []string) ([]string, error) {
 
 		files, err := filepath.Glob(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "glob")
+			return nil, fmt.Errorf("glob: %w", err)
 		}
 		if len(files) == 0 {
 			logrus.Warnf("%s did not match any file", p)
 		}
 
 		for _, f := range files {
-			var filesInDirectory []string
-
-			if err := filepath.Walk(f, func(path string, info os.FileInfo, err error) error {
-				if !info.IsDir() {
-					filesInDirectory = append(filesInDirectory, path)
-				}
-
+			if err := walk.From(f).WhenIsFile().Do(func(path string, _ walk.Dirent) error {
+				set.Add(path)
 				return nil
 			}); err != nil {
-				return nil, errors.Wrap(err, "filepath walk")
-			}
-
-			// Make sure files inside a directory are listed in a consistent order
-			sort.Strings(filesInDirectory)
-			for _, file := range filesInDirectory {
-				set.Add(file)
+				return nil, fmt.Errorf("filepath walk: %w", err)
 			}
 		}
 	}
@@ -174,16 +147,6 @@ func IsURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-func Download(url string) ([]byte, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	return ioutil.ReadAll(resp.Body)
-}
-
 // VerifyOrCreateFile checks if a file exists at the given path,
 // and if not, creates all parent directories and creates the file.
 func VerifyOrCreateFile(path string) error {
@@ -191,10 +154,10 @@ func VerifyOrCreateFile(path string) error {
 	if err != nil && os.IsNotExist(err) {
 		dir := filepath.Dir(path)
 		if err = os.MkdirAll(dir, 0744); err != nil {
-			return errors.Wrap(err, "creating parent directory")
+			return fmt.Errorf("creating parent directory: %w", err)
 		}
 		if _, err = os.Create(path); err != nil {
-			return errors.Wrap(err, "creating file")
+			return fmt.Errorf("creating file: %w", err)
 		}
 		return nil
 	}
@@ -230,6 +193,42 @@ func Expand(text, key, value string) string {
 	return text
 }
 
+// EnvMapToSlice converts map of (string,string) to string slice
+func EnvMapToSlice(m map[string]string, separator string) []string {
+	var sl []string
+	for k, v := range m {
+		sl = append(sl, fmt.Sprintf("%s%s%s", k, separator, v))
+	}
+	sort.Strings(sl)
+	return sl
+}
+
+// EnvPtrMapToSlice converts map of (string,*string) to string slice
+func EnvPtrMapToSlice(m map[string]*string, separator string) []string {
+	var sl []string
+	for k, v := range m {
+		if v == nil {
+			sl = append(sl, k)
+			continue
+		}
+		sl = append(sl, fmt.Sprintf("%s%s%s", k, separator, *v))
+	}
+	sort.Strings(sl)
+	return sl
+}
+
+// EnvSliceToMap converts a string slice into a map of (string,string) using the given separator
+func EnvSliceToMap(slice []string, separator string) map[string]string {
+	m := make(map[string]string, len(slice))
+	for _, e := range slice {
+		// Toss any keys without a value
+		if v := strings.SplitN(e, separator, 2); len(v) == 2 {
+			m[v[0]] = v[1]
+		}
+	}
+	return m
+}
+
 func isAlphaNum(c uint8) bool {
 	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
@@ -242,7 +241,7 @@ func AbsFile(workspace string, filename string) (string, error) {
 		return "", err
 	}
 	if info.IsDir() {
-		return "", errors.Errorf("%s is a directory", file)
+		return "", fmt.Errorf("%s is a directory", file)
 	}
 	return filepath.Abs(file)
 }
@@ -328,6 +327,15 @@ func IsHiddenDir(filename string) bool {
 // File is hidden if it starts with prefix "."
 func IsHiddenFile(filename string) bool {
 	return hasHiddenPrefix(filename)
+}
+
+// IsSubPath return true if targetpath is sub-path of basepath; doesn't check for symlinks
+func IsSubPath(basepath string, targetpath string) bool {
+	rel, err := filepath.Rel(basepath, targetpath)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func hasHiddenPrefix(s string) bool {

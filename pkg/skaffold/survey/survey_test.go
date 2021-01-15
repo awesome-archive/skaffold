@@ -19,7 +19,6 @@ package survey
 import (
 	"bytes"
 	"io"
-	"os"
 	"testing"
 
 	"github.com/GoogleContainerTools/skaffold/testutil"
@@ -34,7 +33,7 @@ func TestDisplaySurveyForm(t *testing.T) {
 		{
 			description: "std out",
 			mockStdOut:  true,
-			expected:    Prompt + "\n",
+			expected:    Prompt,
 		},
 		{
 			description: "not std out",
@@ -44,36 +43,12 @@ func TestDisplaySurveyForm(t *testing.T) {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			mock := func(io.Writer) bool { return test.mockStdOut }
 			t.Override(&isStdOut, mock)
+			mockOpen := func(string) error { return nil }
+			t.Override(&open, mockOpen)
+			t.Override(&updateConfig, func(_ string) error { return nil })
 			var buf bytes.Buffer
-			DisplaySurveyForm(&buf)
+			New("test").DisplaySurveyPrompt(&buf)
 			t.CheckDeepEqual(test.expected, buf.String())
-		})
-	}
-}
-
-func TestIsStdOut(t *testing.T) {
-	tests := []struct {
-		description string
-		out         io.Writer
-		expected    bool
-	}{
-		{
-			description: "std out passed",
-			out:         os.Stdout,
-			expected:    true,
-		},
-		{
-			description: "out nil",
-			out:         nil,
-		},
-		{
-			description: "out bytes buffer",
-			out:         new(bytes.Buffer),
-		},
-	}
-	for _, test := range tests {
-		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.CheckDeepEqual(test.expected, isStdOut(test.out))
 		})
 	}
 }

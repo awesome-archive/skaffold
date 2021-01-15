@@ -28,13 +28,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/label"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/deploy/status"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubectl"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/client"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
 
 func TestDeploy(t *testing.T) {
-	expectedOutput := "Waiting for deployments to stabilize"
+	expectedOutput := "Waiting for deployments to stabilize..."
 	tests := []struct {
 		description string
 		testBench   *TestBench
@@ -60,15 +65,15 @@ func TestDeploy(t *testing.T) {
 		},
 	}
 
-	dummyStatusCheck := func(context.Context, *deploy.DefaultLabeller, *runcontext.RunContext, io.Writer) error {
-		return nil
-	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
-			t.Override(&statusCheck, dummyStatusCheck)
+			t.Override(&client.Client, mockK8sClient)
+			t.Override(&newStatusCheck, func(status.Config, *label.DefaultLabeller) status.Checker {
+				return dummyStatusChecker{}
+			})
 
-			runner := createRunner(t, test.testBench, nil)
+			runner := createRunner(t, test.testBench, nil, []*latest.Artifact{{ImageName: "img1"}, {ImageName: "img2"}})
 			runner.runCtx.Opts.StatusCheck = test.statusCheck
 			out := new(bytes.Buffer)
 
@@ -110,16 +115,15 @@ func TestDeployNamespace(t *testing.T) {
 		},
 	}
 
-	dummyStatusCheck := func(context.Context, *deploy.DefaultLabeller, *runcontext.RunContext, io.Writer) error {
-		return nil
-	}
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
-			t.SetupFakeKubernetesContext(
-				api.Config{CurrentContext: "cluster1"})
-			t.Override(&statusCheck, dummyStatusCheck)
+			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
+			t.Override(&client.Client, mockK8sClient)
+			t.Override(&newStatusCheck, func(status.Config, *label.DefaultLabeller) status.Checker {
+				return dummyStatusChecker{}
+			})
 
-			runner := createRunner(t, test.testBench, nil)
+			runner := createRunner(t, test.testBench, nil, []*latest.Artifact{{ImageName: "img1"}, {ImageName: "img2"}})
 			runner.runCtx.Namespaces = test.Namespaces
 
 			runner.Deploy(context.Background(), ioutil.Discard, []build.Artifact{
@@ -127,7 +131,38 @@ func TestDeployNamespace(t *testing.T) {
 				{ImageName: "img2", Tag: "img2:tag2"},
 			})
 
-			t.CheckDeepEqual(test.expected, runner.runCtx.Namespaces)
+			t.CheckDeepEqual(test.expected, runner.runCtx.GetNamespaces())
 		})
 	}
+}
+
+func TestSkaffoldDeployRenderOnly(t *testing.T) {
+	testutil.Run(t, "does not make kubectl calls", func(t *testutil.T) {
+		runCtx := &runcontext.RunContext{
+			Opts: config.SkaffoldOptions{
+				Namespace:  "testNamespace",
+				RenderOnly: true,
+			},
+			KubeContext: "does-not-exist",
+		}
+
+		deployer, err := getDeployer(runCtx, nil)
+		t.RequireNoError(err)
+		r := SkaffoldRunner{
+			runCtx:     runCtx,
+			kubectlCLI: kubectl.NewCLI(runCtx, ""),
+			deployer:   deployer,
+		}
+		var builds []build.Artifact
+
+		err = r.Deploy(context.Background(), ioutil.Discard, builds)
+
+		t.CheckNoError(err)
+	})
+}
+
+type dummyStatusChecker struct{}
+
+func (d dummyStatusChecker) Check(_ context.Context, _ io.Writer) error {
+	return nil
 }

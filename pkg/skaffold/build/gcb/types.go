@@ -21,16 +21,12 @@ import (
 	"io"
 	"time"
 
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/docker"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/jib"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
 const (
@@ -83,53 +79,34 @@ func NewStatusBackoff() *wait.Backoff {
 // Builder builds artifacts with Google Cloud Build.
 type Builder struct {
 	*latest.GoogleCloudBuild
-	skipTests          bool
-	insecureRegistries map[string]bool
+
+	cfg           Config
+	skipTests     bool
+	muted         build.Muted
+	artifactStore build.ArtifactStore
+}
+
+type Config interface {
+	docker.Config
+
+	SkipTests() bool
+	Muted() config.Muted
 }
 
 // NewBuilder creates a new Builder that builds artifacts with Google Cloud Build.
-func NewBuilder(runCtx *runcontext.RunContext) *Builder {
+func NewBuilder(cfg Config, buildCfg *latest.GoogleCloudBuild) *Builder {
 	return &Builder{
-		GoogleCloudBuild:   runCtx.Cfg.Build.GoogleCloudBuild,
-		skipTests:          runCtx.Opts.SkipTests,
-		insecureRegistries: runCtx.InsecureRegistries,
+		GoogleCloudBuild: buildCfg,
+		cfg:              cfg,
+		skipTests:        cfg.SkipTests(),
+		muted:            cfg.Muted(),
 	}
 }
 
-// Labels are labels specific to Google Cloud Build.
-func (b *Builder) Labels() map[string]string {
-	return map[string]string{
-		constants.Labels.Builder: "google-cloud-build",
-	}
-}
-
-// DependenciesForArtifact returns the dependencies for this artifact
-func (b *Builder) DependenciesForArtifact(ctx context.Context, a *latest.Artifact) ([]string, error) {
-	var paths []string
-	var err error
-
-	switch {
-	case a.KanikoArtifact != nil:
-		paths, err = docker.GetDependencies(ctx, a.Workspace, a.KanikoArtifact.DockerfilePath, a.KanikoArtifact.BuildArgs, b.insecureRegistries)
-
-	case a.DockerArtifact != nil:
-		paths, err = docker.GetDependencies(ctx, a.Workspace, a.DockerArtifact.DockerfilePath, a.DockerArtifact.BuildArgs, b.insecureRegistries)
-
-	case a.JibArtifact != nil:
-		paths, err = jib.GetDependencies(ctx, a.Workspace, a.JibArtifact)
-	}
-
-	if err != nil {
-		return nil, errors.Wrapf(err, "getting dependencies for %s", a.ImageName)
-	}
-
-	return util.AbsolutePaths(a.Workspace, paths), nil
+func (b *Builder) ArtifactStore(store build.ArtifactStore) {
+	b.artifactStore = store
 }
 
 func (b *Builder) Prune(ctx context.Context, out io.Writer) error {
 	return nil // noop
-}
-
-func (b *Builder) SyncMap(ctx context.Context, artifact *latest.Artifact) (map[string][]string, error) {
-	return nil, build.ErrSyncMapNotSupported{}
 }

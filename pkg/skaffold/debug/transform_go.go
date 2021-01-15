@@ -21,10 +21,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
-
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
+
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
 )
 
 type dlvTransformer struct{}
@@ -50,7 +50,7 @@ type dlvSpec struct {
 }
 
 func newDlvSpec(port uint16) dlvSpec {
-	return dlvSpec{mode: "exec", host: "localhost", port: port, apiVersion: defaultAPIVersion, headless: true}
+	return dlvSpec{mode: "exec", port: port, apiVersion: defaultAPIVersion, headless: true}
 }
 
 // isLaunchingDlv determines if the arguments seems to be invoking Delve
@@ -61,10 +61,27 @@ func isLaunchingDlv(args []string) bool {
 func (t dlvTransformer) IsApplicable(config imageConfiguration) bool {
 	for _, name := range []string{"GODEBUG", "GOGC", "GOMAXPROCS", "GOTRACEBACK"} {
 		if _, found := config.env[name]; found {
+			logrus.Infof("Artifact %q has Go runtime: has env %q", config.artifact, name)
 			return true
 		}
 	}
-	if len(config.entrypoint) > 0 {
+
+	// FIXME: as there is currently no way to identify a buildpacks-produced image as holding a Go binary,
+	// nor to cause certain environment variables to be defined in the resulting image, look at the image's
+	// CNB metadata to see if any well-known Go-related buildpacks had been involved.
+	knownGoBuildpackIds := []string{
+		"google.go.build",                                           // GCP Buildpacks
+		"paketo-buildpacks/go-compiler", "paketo-buildpacks/go-mod", // Cloud Foundry
+		"heroku/go", // Heroku
+	}
+	cnbBuildMetadata := config.labels["io.buildpacks.build.metadata"]
+	for _, id := range knownGoBuildpackIds {
+		if strings.Contains(cnbBuildMetadata, id) {
+			logrus.Infof("Artifact %q has Go buildpacks %q", config.artifact, id)
+			return true
+		}
+	}
+	if len(config.entrypoint) > 0 && !isEntrypointLauncher(config.entrypoint) {
 		return isLaunchingDlv(config.entrypoint)
 	}
 	if len(config.arguments) > 0 {
@@ -73,45 +90,35 @@ func (t dlvTransformer) IsApplicable(config imageConfiguration) bool {
 	return false
 }
 
-func (t dlvTransformer) RuntimeSupportImage() string {
-	return "go"
-}
-
 // Apply configures a container definition for Go with Delve.
-// Returns a simple map describing the debug configuration details.
-func (t dlvTransformer) Apply(container *v1.Container, config imageConfiguration, portAlloc portAllocator) map[string]interface{} {
+// Returns the debug configuration details, with the "go" support image
+func (t dlvTransformer) Apply(container *v1.Container, config imageConfiguration, portAlloc portAllocator) (ContainerDebugConfiguration, string, error) {
 	logrus.Infof("Configuring %q for Go/Delve debugging", container.Name)
 
 	// try to find existing `dlv` command
 	spec := retrieveDlvSpec(config)
-	// todo: find existing containerPort "dlv" and use port. But what if it conflicts with command-line spec?
 
 	if spec == nil {
 		newSpec := newDlvSpec(uint16(portAlloc(defaultDlvPort)))
 		spec = &newSpec
 		switch {
-		case len(config.entrypoint) > 0:
-			container.Command = rewriteDlvCommandLine(config.entrypoint, *spec)
+		case len(config.entrypoint) > 0 && !isEntrypointLauncher(config.entrypoint):
+			container.Command = rewriteDlvCommandLine(config.entrypoint, *spec, container.Args)
 
-		case len(config.entrypoint) == 0 && len(config.arguments) > 0:
-			container.Args = rewriteDlvCommandLine(config.arguments, *spec)
+		case (len(config.entrypoint) == 0 || isEntrypointLauncher(config.entrypoint)) && len(config.arguments) > 0:
+			container.Args = rewriteDlvCommandLine(config.arguments, *spec, container.Args)
 
 		default:
-			logrus.Warnf("Skipping %q as does not appear to be Go-based", container.Name)
-			return nil
+			return ContainerDebugConfiguration{}, "", fmt.Errorf("container %q has no command-line", container.Name)
 		}
 	}
 
-	dlvPort := v1.ContainerPort{
-		Name:          "dlv",
-		ContainerPort: int32(spec.port),
-	}
-	container.Ports = append(container.Ports, dlvPort)
+	container.Ports = exposePort(container.Ports, "dlv", int32(spec.port))
 
-	return map[string]interface{}{
-		"runtime": "go",
-		"dlv":     spec.port,
-	}
+	return ContainerDebugConfiguration{
+		Runtime: "go",
+		Ports:   map[string]uint32{"dlv": uint32(spec.port)},
+	}, "go", nil
 }
 
 func retrieveDlvSpec(config imageConfiguration) *dlvSpec {
@@ -128,6 +135,7 @@ func extractDlvSpec(args []string) *dlvSpec {
 	if !isLaunchingDlv(args) {
 		return nil
 	}
+	// delve's defaults
 	spec := dlvSpec{apiVersion: 2, log: false, headless: false}
 arguments:
 	for _, arg := range args {
@@ -144,8 +152,8 @@ arguments:
 			address := strings.SplitN(arg, "=", 2)[1]
 			split := strings.SplitN(address, ":", 2)
 			switch len(split) {
-			// port only
 			case 1:
+				// this is actually an error: delve insists on a :port
 				p, _ := strconv.ParseUint(split[0], 10, 16)
 				spec.port = uint16(p)
 
@@ -165,10 +173,9 @@ arguments:
 }
 
 // rewriteDlvCommandLine rewrites a go command-line to insert a `dlv`
-func rewriteDlvCommandLine(commandLine []string, spec dlvSpec) []string {
+func rewriteDlvCommandLine(commandLine []string, spec dlvSpec, args []string) []string {
 	// todo: parse off dlv commands if present?
-
-	if len(commandLine) > 1 {
+	if len(commandLine) > 1 || len(args) > 0 {
 		// insert "--" after app binary to indicate end of Delve arguments
 		commandLine = util.StrSliceInsert(commandLine, 1, []string{"--"})
 	}
@@ -182,15 +189,10 @@ func (spec dlvSpec) asArguments() []string {
 		args = append(args, "--headless")
 	}
 	args = append(args, "--continue", "--accept-multiclient")
-	host := "localhost"
-	if spec.host != "" {
-		host = spec.host
-	}
 	if spec.port > 0 {
-		args = append(args, fmt.Sprintf("--listen=%s:%d", host, spec.port))
-		//args = append(args, ":", strconv.FormatInt(int64(spec.port), 10))
+		args = append(args, fmt.Sprintf("--listen=%s:%d", spec.host, spec.port))
 	} else {
-		args = append(args, fmt.Sprintf("--listen=%s", host))
+		args = append(args, fmt.Sprintf("--listen=%s", spec.host))
 	}
 	if spec.apiVersion > 0 {
 		args = append(args, fmt.Sprintf("--api-version=%d", spec.apiVersion))

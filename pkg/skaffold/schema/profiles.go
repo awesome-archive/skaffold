@@ -20,18 +20,17 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	re "regexp"
 	"strings"
 
 	yamlpatch "github.com/krishicks/yaml-patch"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	yaml "gopkg.in/yaml.v2"
 
 	cfg "github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
 	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
+	skutil "github.com/GoogleContainerTools/skaffold/pkg/skaffold/util"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yaml"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/yamltags"
 )
 
@@ -42,7 +41,7 @@ func ApplyProfiles(c *latest.SkaffoldConfig, opts cfg.SkaffoldOptions) error {
 
 	profiles, contextSpecificProfiles, err := activatedProfiles(c.Profiles, opts)
 	if err != nil {
-		return errors.Wrap(err, "finding auto-activated profiles")
+		return fmt.Errorf("finding auto-activated profiles: %w", err)
 	}
 
 	for _, name := range profiles {
@@ -52,7 +51,7 @@ func ApplyProfiles(c *latest.SkaffoldConfig, opts cfg.SkaffoldOptions) error {
 		}
 
 		if err := applyProfile(c, profile); err != nil {
-			return errors.Wrapf(err, "applying profile %s", name)
+			return fmt.Errorf("applying profile %q: %w", name, err)
 		}
 	}
 
@@ -67,7 +66,7 @@ func checkKubeContextConsistency(contextSpecificProfiles []string, cliContext, e
 
 	kubeConfig, err := kubectx.CurrentConfig()
 	if err != nil {
-		return errors.Wrap(err, "getting current cluster context")
+		return fmt.Errorf("getting current cluster context: %w", err)
 	}
 	currentContext := kubeConfig.CurrentContext
 
@@ -82,34 +81,57 @@ func checkKubeContextConsistency(contextSpecificProfiles []string, cliContext, e
 // activatedProfiles returns the activated profiles and activated profiles which are kube-context specific.
 // The latter matters for error reporting when the effective kube-context changes.
 func activatedProfiles(profiles []latest.Profile, opts cfg.SkaffoldOptions) ([]string, []string, error) {
-	activated := opts.Profiles
+	var activated []string
 	var contextSpecificProfiles []string
 
-	// Auto-activated profiles
-	for _, profile := range profiles {
-		for _, cond := range profile.Activation {
-			command := isCommand(cond.Command, opts)
+	if opts.ProfileAutoActivation {
+		// Auto-activated profiles
+		for _, profile := range profiles {
+			for _, cond := range profile.Activation {
+				command := isCommand(cond.Command, opts)
 
-			env, err := isEnv(cond.Env)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			kubeContext, err := isKubeContext(cond.KubeContext, opts)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			if command && env && kubeContext {
-				if cond.KubeContext != "" {
-					contextSpecificProfiles = append(contextSpecificProfiles, profile.Name)
+				env, err := isEnv(cond.Env)
+				if err != nil {
+					return nil, nil, err
 				}
-				activated = append(activated, profile.Name)
+
+				kubeContext, err := isKubeContext(cond.KubeContext, opts)
+				if err != nil {
+					return nil, nil, err
+				}
+
+				if command && env && kubeContext {
+					if cond.KubeContext != "" {
+						contextSpecificProfiles = append(contextSpecificProfiles, profile.Name)
+					}
+					activated = append(activated, profile.Name)
+					break
+				}
 			}
 		}
 	}
 
+	for _, profile := range opts.Profiles {
+		if strings.HasPrefix(profile, "-") {
+			activated = removeValue(activated, strings.TrimPrefix(profile, "-"))
+		} else if !skutil.StrSliceContains(activated, profile) {
+			activated = append(activated, profile)
+		}
+	}
+
 	return activated, contextSpecificProfiles, nil
+}
+
+func removeValue(values []string, value string) []string {
+	var updated []string
+
+	for _, v := range values {
+		if v != value {
+			updated = append(updated, v)
+		}
+	}
+
+	return updated
 }
 
 func isEnv(env string) (bool, error) {
@@ -133,7 +155,7 @@ func isEnv(env string) (bool, error) {
 		return envValue == "", nil
 	}
 
-	return satisfies(value, envValue), nil
+	return skutil.RegexEqual(value, envValue), nil
 }
 
 func isCommand(command string, opts cfg.SkaffoldOptions) bool {
@@ -141,7 +163,7 @@ func isCommand(command string, opts cfg.SkaffoldOptions) bool {
 		return true
 	}
 
-	return satisfies(command, opts.Command)
+	return skutil.RegexEqual(command, opts.Command)
 }
 
 func isKubeContext(kubeContext string, opts cfg.SkaffoldOptions) (bool, error) {
@@ -151,39 +173,15 @@ func isKubeContext(kubeContext string, opts cfg.SkaffoldOptions) (bool, error) {
 
 	// cli flag takes precedence
 	if opts.KubeContext != "" {
-		return satisfies(kubeContext, opts.KubeContext), nil
+		return skutil.RegexEqual(kubeContext, opts.KubeContext), nil
 	}
 
 	currentKubeConfig, err := kubectx.CurrentConfig()
 	if err != nil {
-		return false, errors.Wrap(err, "getting current cluster context")
+		return false, fmt.Errorf("getting current cluster context: %w", err)
 	}
 
-	return satisfies(kubeContext, currentKubeConfig.CurrentContext), nil
-}
-
-func satisfies(expected, actual string) bool {
-	if strings.HasPrefix(expected, "!") {
-		notExpected := expected[1:]
-
-		return !matches(notExpected, actual)
-	}
-
-	return matches(expected, actual)
-}
-
-func matches(expected, actual string) bool {
-	if actual == expected {
-		return true
-	}
-
-	matcher, err := re.Compile(expected)
-	if err != nil {
-		logrus.Infof("profile activation criteria '%s' is not a valid regexp, falling back to string", expected)
-		return false
-	}
-
-	return matcher.MatchString(actual)
+	return skutil.RegexEqual(kubeContext, currentKubeConfig.CurrentContext), nil
 }
 
 func applyProfile(config *latest.SkaffoldConfig, profile latest.Profile) error {

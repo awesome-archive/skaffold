@@ -71,13 +71,13 @@ func TestColorPicker(t *testing.T) {
 		},
 	}
 
-	picker := NewColorPicker([]string{"image", "second"})
+	picker := NewColorPicker([]string{"image:ignored", "second"})
 
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			color := picker.Pick(test.pod)
 
-			t.CheckDeepEqual(test.expectedColor, color)
+			t.CheckTrue(test.expectedColor == color)
 		})
 	}
 }

@@ -18,15 +18,73 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"io/ioutil"
 	"testing"
 
-	"github.com/pkg/errors"
 	"k8s.io/client-go/tools/clientcmd/api"
 
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/build"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/client"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/testutil"
 )
+
+func TestTest(t *testing.T) {
+	tests := []struct {
+		description     string
+		testBench       *TestBench
+		cfg             []*latest.Artifact
+		artifacts       []build.Artifact
+		expectedActions []Actions
+		shouldErr       bool
+	}{
+		{
+			description: "test no error",
+			testBench:   &TestBench{},
+			cfg:         []*latest.Artifact{{ImageName: "img1"}, {ImageName: "img2"}},
+			artifacts: []build.Artifact{
+				{ImageName: "img1", Tag: "img1:tag1"},
+				{ImageName: "img2", Tag: "img2:tag2"},
+			},
+			expectedActions: []Actions{{
+				Tested: []string{"img1:tag1", "img2:tag2"},
+			}},
+		},
+		{
+			description:     "no artifacts",
+			testBench:       &TestBench{},
+			artifacts:       []build.Artifact(nil),
+			expectedActions: []Actions{{}},
+		},
+		{
+			description: "missing tag",
+			testBench:   &TestBench{},
+			cfg:         []*latest.Artifact{{ImageName: "image1"}},
+			artifacts:   []build.Artifact{{ImageName: "image1"}},
+			expectedActions: []Actions{{
+				Tested: []string{""},
+			}},
+		},
+		{
+			description:     "test error",
+			testBench:       &TestBench{testErrors: []error{errors.New("")}},
+			expectedActions: []Actions{{}},
+			shouldErr:       true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			runner := createRunner(t, test.testBench, nil, test.cfg)
+
+			err := runner.Test(context.Background(), ioutil.Discard, test.artifacts)
+
+			t.CheckError(test.shouldErr, err)
+
+			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedActions, test.testBench.Actions())
+		})
+	}
+}
 
 func TestBuildTestDeploy(t *testing.T) {
 	tests := []struct {
@@ -71,19 +129,118 @@ func TestBuildTestDeploy(t *testing.T) {
 	for _, test := range tests {
 		testutil.Run(t, test.description, func(t *testutil.T) {
 			t.SetupFakeKubernetesContext(api.Config{CurrentContext: "cluster1"})
+			t.Override(&client.Client, mockK8sClient)
 
 			ctx := context.Background()
 			artifacts := []*latest.Artifact{{
 				ImageName: "img",
 			}}
 
-			runner := createRunner(t, test.testBench, nil)
-			bRes, err := runner.BuildAndTest(ctx, ioutil.Discard, artifacts)
+			runner := createRunner(t, test.testBench, nil, artifacts)
+			bRes, err := runner.Build(ctx, ioutil.Discard, artifacts)
 			if err == nil {
-				err = runner.DeployAndLog(ctx, ioutil.Discard, bRes)
+				err = runner.Test(ctx, ioutil.Discard, bRes)
+				if err == nil {
+					err = runner.DeployAndLog(ctx, ioutil.Discard, bRes)
+				}
 			}
 
 			t.CheckErrorAndDeepEqual(test.shouldErr, err, test.expectedActions, test.testBench.Actions())
+		})
+	}
+}
+
+func TestBuildDryRun(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		testBench := &TestBench{}
+		artifacts := []*latest.Artifact{
+			{ImageName: "img1"},
+			{ImageName: "img2"},
+		}
+		runner := createRunner(t, testBench, nil, artifacts)
+		runner.runCtx.Opts.DryRun = true
+
+		bRes, err := runner.Build(context.Background(), ioutil.Discard, artifacts)
+
+		t.CheckNoError(err)
+		t.CheckDeepEqual([]build.Artifact{
+			{ImageName: "img1", Tag: "img1:latest"},
+			{ImageName: "img2", Tag: "img2:latest"}}, bRes)
+		// Nothing was built, tested or deployed
+		t.CheckDeepEqual([]Actions{{}}, testBench.Actions())
+	})
+}
+
+func TestBuildSkipBuild(t *testing.T) {
+	testutil.Run(t, "", func(t *testutil.T) {
+		testBench := &TestBench{}
+		artifacts := []*latest.Artifact{
+			{ImageName: "img1"},
+			{ImageName: "img2"},
+		}
+		runner := createRunner(t, testBench, nil, artifacts)
+		runner.runCtx.Opts.DigestSource = "none"
+
+		bRes, err := runner.Build(context.Background(), ioutil.Discard, artifacts)
+
+		t.CheckNoError(err)
+		t.CheckDeepEqual([]build.Artifact{}, bRes)
+		// Nothing was built, tested or deployed
+		t.CheckDeepEqual([]Actions{{}}, testBench.Actions())
+	})
+}
+
+func TestCheckWorkspaces(t *testing.T) {
+	tmpDir := testutil.NewTempDir(t).Touch("file")
+	tmpFile := tmpDir.Path("file")
+
+	tests := []struct {
+		description string
+		artifacts   []*latest.Artifact
+		shouldErr   bool
+	}{
+		{
+			description: "no workspace",
+			artifacts: []*latest.Artifact{
+				{
+					ImageName: "image",
+				},
+			},
+		},
+		{
+			description: "directory that exists",
+			artifacts: []*latest.Artifact{
+				{
+					ImageName: "image",
+					Workspace: tmpDir.Root(),
+				},
+			},
+		},
+		{
+			description: "error on non-existent location",
+			artifacts: []*latest.Artifact{
+				{
+					ImageName: "image",
+					Workspace: "doesnotexist",
+				},
+			},
+			shouldErr: true,
+		},
+		{
+			description: "error on file",
+			artifacts: []*latest.Artifact{
+				{
+					ImageName: "image",
+					Workspace: tmpFile,
+				},
+			},
+			shouldErr: true,
+		},
+	}
+	for _, test := range tests {
+		testutil.Run(t, test.description, func(t *testutil.T) {
+			err := checkWorkspaces(test.artifacts)
+			t.CheckError(test.shouldErr, err)
 		})
 	}
 }

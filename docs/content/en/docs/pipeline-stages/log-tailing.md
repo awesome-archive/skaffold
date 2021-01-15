@@ -5,17 +5,17 @@ weight: 40
 featureId: logging
 ---
 
-Skaffold has built-in support for tailing logs for containers **deployed by Skaffold** on your cluster
+Skaffold has built-in support for tailing logs for containers **built and deployed by Skaffold** on your cluster
 to your local machine when running in either `dev`, `debug` or `run` mode.
 
 {{< alert title="Note" >}}
-Log Tailing is **enabled by default** for [`dev`](<relref docs="/docs/workflows/dev" >}}) and [`debug`](<relref docs="/docs/workflows/debug" >}}).<br>
+Log Tailing is **enabled by default** for [`dev`]({{<relref "/docs/workflows/dev" >}}) and [`debug`]({{<relref "/docs/workflows/debug" >}}).<br>
 Log Tailing is **disabled by default** for `run` mode; it can be enabled with the `--tail` flag.
 {{< /alert >}}
 
 
 ## Log Structure
-To view log structure, run `skaffold run --tail` on [examples microserices](https://github.com/GoogleContainerTools/skaffold/tree/master/examples/microservices)
+To view log structure, run `skaffold run --tail` in [`examples/microservices`](https://github.com/GoogleContainerTools/skaffold/tree/master/examples/microservices)
 
 ```bash
 skaffold run --tail

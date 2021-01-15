@@ -1,0 +1,7 @@
+apiVersion: skaffold/v2beta10
+kind: Config
+build:
+  artifacts:
+  - image: skaffold-buildpacks-node
+    buildpacks:
+      builder: "gcr.io/buildpacks/builder:v1"

@@ -18,20 +18,23 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/config"
-	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/constants"
+	sErrors "github.com/GoogleContainerTools/skaffold/pkg/skaffold/errors"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/event"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/instrumentation"
 	kubectx "github.com/GoogleContainerTools/skaffold/pkg/skaffold/kubernetes/context"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/runner/runcontext"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/defaults"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/latest"
+	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/util"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/schema/validation"
 	"github.com/GoogleContainerTools/skaffold/pkg/skaffold/update"
 )
@@ -39,10 +42,11 @@ import (
 // For tests
 var createRunner = createNewRunner
 
-func withRunner(ctx context.Context, action func(runner.Runner, *latest.SkaffoldConfig) error) error {
+func withRunner(ctx context.Context, action func(runner.Runner, []*latest.SkaffoldConfig) error) error {
 	runner, config, err := createRunner(opts)
+	sErrors.SetSkaffoldOptions(opts)
 	if err != nil {
-		return errors.Wrap(err, "creating runner")
+		return err
 	}
 
 	err = action(runner, config)
@@ -51,52 +55,92 @@ func withRunner(ctx context.Context, action func(runner.Runner, *latest.Skaffold
 }
 
 // createNewRunner creates a Runner and returns the SkaffoldConfig associated with it.
-func createNewRunner(opts config.SkaffoldOptions) (runner.Runner, *latest.SkaffoldConfig, error) {
-	parsed, err := schema.ParseConfig(opts.ConfigurationFile, true)
+func createNewRunner(opts config.SkaffoldOptions) (runner.Runner, []*latest.SkaffoldConfig, error) {
+	runCtx, configs, err := runContext(opts)
 	if err != nil {
-		if os.IsNotExist(errors.Cause(err)) {
-			return nil, nil, fmt.Errorf("[%s] not found. You might need to run `skaffold init`", opts.ConfigurationFile)
+		return nil, nil, err
+	}
+
+	instrumentation.InitMeterFromConfig(configs)
+	runner, err := runner.NewForConfig(runCtx)
+	if err != nil {
+		event.InititializationFailed(err)
+		return nil, nil, fmt.Errorf("creating runner: %w", err)
+	}
+
+	return runner, configs, nil
+}
+
+func runContext(opts config.SkaffoldOptions) (*runcontext.RunContext, []*latest.SkaffoldConfig, error) {
+	parsed, err := schema.ParseConfigAndUpgrade(opts.ConfigurationFile, latest.Version)
+	if err != nil {
+		if os.IsNotExist(errors.Unwrap(err)) {
+			return nil, nil, fmt.Errorf("skaffold config file %s not found - check your current working directory, or try running `skaffold init`", opts.ConfigurationFile)
 		}
 
 		// If the error is NOT that the file doesn't exist, then we warn the user
 		// that maybe they are using an outdated version of Skaffold that's unable to read
 		// the configuration.
 		warnIfUpdateIsAvailable()
-		return nil, nil, errors.Wrap(err, "parsing skaffold config")
+		return nil, nil, fmt.Errorf("parsing skaffold config: %w", err)
 	}
 
-	config := parsed.(*latest.SkaffoldConfig)
-
-	if err = schema.ApplyProfiles(config, opts); err != nil {
-		return nil, nil, errors.Wrap(err, "applying profiles")
+	if len(parsed) == 0 {
+		return nil, nil, fmt.Errorf("skaffold config file %s is empty", opts.ConfigurationFile)
 	}
 
-	kubectx.ConfigureKubeConfig(opts.KubeConfig, opts.KubeContext, config.Deploy.KubeContext)
+	setDefaultDeployer := setDefaultDeployer(parsed)
+	var pipelines []latest.Pipeline
+	var configs []*latest.SkaffoldConfig
+	for _, cfg := range parsed {
+		config := cfg.(*latest.SkaffoldConfig)
 
-	if err := defaults.Set(config); err != nil {
-		return nil, nil, errors.Wrap(err, "setting default values")
+		if err = schema.ApplyProfiles(config, opts); err != nil {
+			return nil, nil, fmt.Errorf("applying profiles: %w", err)
+		}
+		if err := defaults.Set(config, setDefaultDeployer); err != nil {
+			return nil, nil, fmt.Errorf("setting default values: %w", err)
+		}
+		pipelines = append(pipelines, config.Pipeline)
+		configs = append(configs, config)
 	}
 
-	if err := validation.Process(config); err != nil {
-		return nil, nil, errors.Wrap(err, "invalid skaffold config")
+	// TODO: Should support per-config kubecontext. Right now we constrain all configs to define the same kubecontext.
+	kubectx.ConfigureKubeConfig(opts.KubeConfig, opts.KubeContext, configs[0].Deploy.KubeContext)
+
+	if err := validation.Process(configs); err != nil {
+		return nil, nil, fmt.Errorf("invalid skaffold config: %w", err)
 	}
 
-	runCtx, err := runcontext.GetRunContext(opts, config.Pipeline)
+	runCtx, err := runcontext.GetRunContext(opts, pipelines)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting run context")
+		return nil, nil, fmt.Errorf("getting run context: %w", err)
 	}
 
-	runner, err := runner.NewForConfig(runCtx)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "creating runner")
+	if err := validation.ProcessWithRunContext(runCtx); err != nil {
+		return nil, nil, fmt.Errorf("invalid skaffold config: %w", err)
 	}
 
-	return runner, config, nil
+	return runCtx, configs, nil
+}
+
+func setDefaultDeployer(configs []util.VersionedConfig) bool {
+	// set the default deployer only if no deployer is explicitly specified in any config
+	for _, cfg := range configs {
+		if cfg.(*latest.SkaffoldConfig).Deploy.DeployType != (latest.DeployType{}) {
+			return false
+		}
+	}
+	return true
 }
 
 func warnIfUpdateIsAvailable() {
-	latest, current, versionErr := update.GetLatestAndCurrentVersion()
-	if versionErr == nil && latest.GT(current) {
-		logrus.Warnf("Your Skaffold version might be too old. Download the latest version (%s) at %s", latest, constants.LatestDownloadURL)
+	warning, err := update.CheckVersionOnError(opts.GlobalConfig)
+	if err != nil {
+		logrus.Infof("update check failed: %s", err)
+		return
+	}
+	if warning != "" {
+		logrus.Warn(warning)
 	}
 }
